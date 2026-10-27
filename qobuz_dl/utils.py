@@ -249,8 +249,13 @@ _LIVE_SUFFIX_RE = re.compile(r"[(\[][^)\]]*\blive\b|\s[-–]\s.*\blive\b", re.I)
 _CONCERT_RE = re.compile(r"\b(unplugged|in concert)\b", re.I)
 _LIVE_TITLE_RE = re.compile(r"^\s*live\s+(at|in|from)\b", re.I)
 _REMASTER_RE = re.compile(r"\bremaster(ed|s)?\b", re.I)
-# Bracketed notes that only describe the edition; versions that differ only by
-# these are grouped together ("Album (Deluxe Edition)" with "Album").
+_YEAR_RE = re.compile(r"\b(?:19[5-9]\d|20\d\d)\b")
+# Notes after the title: bracketed ("Album (2011 Remaster)") or after a spaced
+# dash ("Album - 2011 Remaster"). _DASH_NOTE_RE takes only the last dashed part.
+_NOTE_RE = re.compile(r"[(\[][^)\]]*[)\]]|\s[-–—]\s.*$")
+_DASH_NOTE_RE = re.compile(r"\s[-–—]\s(?:(?!\s[-–—]\s).)*$")
+# Notes that only describe the edition; versions that differ only by these are
+# grouped together ("Album (Deluxe Edition)", "Album - Remastered" and "Album").
 _EDITION_RE = re.compile(
     r"\b(deluxe|edition|remaster(ed|s)?|expanded|anniversary|explicit|clean"
     r"|bonus|special|super|collector'?s|reissue|mono|stereo|complete|extended"
@@ -303,23 +308,39 @@ def _variant_word(word: str) -> str:
     return re.sub(r"(es|ed|s)$", "", word.lower().replace(" ", ""))
 
 
+def _note_variants(note: str):
+    """For a note after the title: None if it's part of the title ("Part 2",
+    "Volume 1"), otherwise the variant words it carries (often none)."""
+    found = [_variant_word(m.group(0)) for m in _VARIANT_RE.finditer(note)]
+    if found or _EDITION_RE.search(note.strip(" ()[]-–—")):
+        return found
+    return None
+
+
 def _group_key(album: dict) -> tuple:
     """Versions of the same release share a key: the title without bracketed
-    notes about the edition, plus any words that make it a different recording
-    ("Acoustic", "Remixes"), whether Qobuz put them in the title or the version.
-    Other bracketed text stays part of the title ("Part 2")."""
+    or dashed notes about the edition, plus any words that make it a different
+    recording ("Acoustic", "Remixes"), whether Qobuz put them in the title or
+    the version. Other notes stay part of the title ("Part 2", "- Volume 1")."""
     variants = set()
 
     def strip_note(match):
-        note = match.group(0)
-        found = [_variant_word(m.group(0)) for m in _VARIANT_RE.finditer(note)]
-        if found or _EDITION_RE.search(note.strip(" ()[]")):
-            variants.update(found)
-            return ""
-        return note
+        found = _note_variants(match.group(0))
+        if found is None:
+            return match.group(0)
+        variants.update(found)
+        return ""
 
     title = (album.get("title") or "").replace("’", "'")
     base = re.sub(r"\s*[(\[][^)\]]*[)\]]", strip_note, title)
+    # Dashed notes, from the end: "Album - Remastered - Deluxe Edition" -> "Album"
+    while True:
+        match = _DASH_NOTE_RE.search(base)
+        found = _note_variants(match.group(0)) if match else None
+        if found is None:
+            break
+        variants.update(found)
+        base = base[: match.start()]
     version = album.get("version") or ""
     variants.update(_variant_word(m.group(0)) for m in _VARIANT_RE.finditer(version))
     base = re.sub(r"\s+", " ", base).strip().lower()
@@ -335,6 +356,23 @@ def _quality_cap(quality) -> tuple:
 
 def _track_count(album: dict) -> int:
     return album.get("tracks_count") or 0
+
+
+def _remaster_rank(album: dict) -> int:
+    """0 for originals; remasters rank by year, newest highest. The year comes
+    from the remaster note ("2011 Remaster", version "Remastered 2021"), not the
+    album's own title ("1999"), and falls back to the release date."""
+    title, version = album.get("title") or "", album.get("version") or ""
+    if not _REMASTER_RE.search(f"{title} {version}"):
+        return 0
+    notes = [n for n in _NOTE_RE.findall(title) + [version] if _REMASTER_RE.search(n)]
+    years = [int(year) for note in notes for year in _YEAR_RE.findall(note)]
+    if not years:
+        released = str(
+            album.get("release_date_original") or album.get("release_date") or ""
+        )[:4]
+        years = [int(released)] if released.isdigit() else []
+    return max(years, default=1)
 
 
 def _describe(album: dict) -> str:
@@ -379,16 +417,11 @@ def _pick_version(versions: list, cap: tuple, details) -> dict:
     top = [a for a, rank in zip(versions, ranks) if rank == max(ranks)]
 
     # 3. deluxe over standard unless its extras are mostly live,
-    # 4. remaster over original, then more tracks
+    # 4. newest remaster over older ones and the original, then more tracks
     standard = min(top, key=_track_count)
     scores = {id(a): _edition_score(a, standard, details) for a in top}
     best = max(
-        top,
-        key=lambda a: (
-            scores[id(a)],
-            bool(_REMASTER_RE.search(f"{a.get('title')} {a.get('version') or ''}")),
-            _track_count(a),
-        ),
+        top, key=lambda a: (scores[id(a)], _remaster_rank(a), _track_count(a))
     )
 
     note = ""
@@ -413,7 +446,8 @@ def smart_discography_filter(contents: list, quality=None, get_album=None) -> li
         2. the highest quality you'll actually get at the chosen quality setting
         3. a deluxe/expanded edition over the standard one, unless more than half
            of its extra tracks are live, in which case the standard one wins
-        4. a remaster over the original, then the version with more tracks
+        4. the newest remaster over older ones and the original, then the
+           version with more tracks
 
     Args:
         contents (list): Discography pages returned by the Qobuz API.

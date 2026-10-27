@@ -16,6 +16,12 @@ from qobuz_dl.bundle import Bundle
 from qobuz_dl.color import GREEN, RED, YELLOW, OFF, CYAN
 from qobuz_dl.commands import qobuz_dl_args
 from qobuz_dl.core import QobuzDL
+from qobuz_dl.download_queue import (
+    QUEUED_COMMANDS,
+    DownloadQueue,
+    is_queued_run,
+    queue_command,
+)
 from qobuz_dl.downloader import DEFAULT_FOLDER, DEFAULT_TRACK
 from qobuz_dl.constants import DEFAULT_VARIOUS_ARTISTS_ALIASES
 from qobuz_dl.settings import QobuzDLSettings
@@ -401,7 +407,8 @@ def main():
                 pass
 
     _initial_checks()
-    check_for_updates()
+    if not is_queued_run():  # once per window is enough
+        check_for_updates()
 
     # --- RADAR FEATURE (Standalone Intercept) ---
     if len(sys.argv) > 1 and sys.argv[1] == "radar":
@@ -553,6 +560,31 @@ def main():
             pass
         sys.exit(f"{GREEN}Database has been purged.{OFF}")
 
+    # --- DOWNLOAD QUEUE ---
+    # A dl/lucky started while another one is downloading joins the queue and
+    # exits; the running qobuz-dl starts it when it's done (see download_queue.py).
+    download_queue = DownloadQueue(CONFIG_PATH)
+    if arguments.command == "queue":
+        try:
+            queue_command(download_queue, run=arguments.run, clear=arguments.clear)
+        except KeyboardInterrupt:
+            pass
+        sys.exit(0)
+    if (
+        arguments.command in QUEUED_COMMANDS
+        and not getattr(arguments, "no_queue", False)
+        and not is_queued_run()
+    ):
+        position = download_queue.enqueue_if_busy(sys.argv[1:], os.getcwd())
+        if position:
+            print(
+                f"{YELLOW}[queue] Another qobuz-dl is downloading, so this is queued "
+                f"(position {position}) and will start when that finishes.\n"
+                f"Add --no-queue to run it alongside instead.{OFF}"
+            )
+            sys.exit(0)
+    # ----------------------
+
     # --- NEW DB SYNC FEATURE (Lightweight Mode) ---
     if getattr(arguments, 'sync_db', None):
         from qobuz_dl.db import create_db
@@ -684,9 +716,14 @@ def main():
         genre_tag_format=genre_tag_format,
     )
     
-    qobuz.initialize_client(email, password, app_id, secrets)
+    try:
+        qobuz.initialize_client(email, password, app_id, secrets)
 
-    _handle_commands(qobuz, arguments)
+        _handle_commands(qobuz, arguments)
+        if download_queue.is_worker:
+            download_queue.run_all()  # whatever was queued while this ran
+    finally:
+        download_queue.release()
 
 
 if __name__ == "__main__":

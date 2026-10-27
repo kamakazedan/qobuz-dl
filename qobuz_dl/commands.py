@@ -72,7 +72,33 @@ def lucky_args(subparsers):
         help="number of results to download (default: 1)",
     )
     lucky.add_argument("QUERY", nargs="+", help="search query")
+    lucky.add_argument(
+        "--no-queue",
+        action="store_true",
+        help="start now, alongside any download that's already running, instead of queueing",
+    )
     return lucky
+
+
+def queue_args(subparsers):
+    """Configures the 'queue' subparser, which shows, runs or clears queued downloads."""
+    queue = subparsers.add_parser(
+        "queue",
+        description=(
+            "Downloads started with 'dl' or 'lucky' while another one is running wait "
+            "in this queue, and start one after another when it finishes."
+        ),
+        help="show, run or clear the download queue",
+    )
+    queue.add_argument(
+        "--run",
+        action="store_true",
+        help="work through the queue now, if nothing is downloading",
+    )
+    queue.add_argument(
+        "--clear", action="store_true", help="remove everything from the queue"
+    )
+    return queue
 
 
 def dl_args(subparsers):
@@ -119,7 +145,12 @@ def dl_args(subparsers):
         help="Filter downloads by label name or Qobuz label URL/ID",
     )
     # --- END LABEL INTERSECTION FLAG ---
-    
+    download.add_argument(
+        "--no-queue",
+        action="store_true",
+        help="start now, alongside any download that's already running, instead of queueing",
+    )
+
     return download
 
 def lyrics_args(subparsers):
@@ -581,7 +612,8 @@ def qobuz_dl_args(
     # Inizializza il nuovo comando
     lyrics_cmd = lyrics_args(subparsers)
     sync_pl_cmd = sync_playlist_args(subparsers)
-    
+    queue_args(subparsers)
+
     [
         add_common_arg(i, default_folder, default_quality)
         for i in (interactive, download, lucky, sync_pl_cmd, lyrics_cmd)

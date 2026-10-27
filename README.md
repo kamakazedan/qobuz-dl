@@ -353,6 +353,19 @@ Download a track keeping the file strictly bit-perfect without writing any volum
 python -m qobuz_dl dl "URL" --no-replaygain-tag
 ```
 
+### 📋 Download Queue
+Start a `dl` or `lucky` while another one is downloading and it joins a queue
+instead of running alongside it; the running one starts it as soon as it's done.
+Each queued command runs exactly as typed (its own flags, from the folder it was
+typed in), and stays queued until it has run, so closing the window loses nothing.
+```bash
+qobuz-dl dl "URL"                 # in a second window: queued
+qobuz-dl dl "URL" --no-queue      # run now, alongside the other download
+qobuz-dl queue                    # list what's queued
+qobuz-dl queue --run              # start the queue if nothing is running
+qobuz-dl queue --clear            # empty the queue
+```
+
 ### 🗄️ Database & Library Management
 The Ultimate Edition includes powerful local library managers to keep track of your downloads, prevent duplicates, and retroactively fix your metadata.
 

@@ -16,6 +16,7 @@ from qobuz_dl.utils import (
     make_m3u,
     smart_discography_filter,
     label_matches,
+    is_main_artist,
     format_duration,
     create_and_return_dir,
     PartialFormatter,
@@ -268,9 +269,35 @@ class QobuzDL:
                 f"{YELLOW}Downloading all the music from {content_name} "
                 f"({url_type})!"
             )
-            new_path = create_and_return_dir(
-                os.path.join(self.directory, sanitize_filename(content_name))
-            )
+            artist_page = url_type == "artist"
+            if artist_page and getattr(self.settings, "no_artist_folder", False):
+                # The folder format already sorts releases by artist ("{artist}/...")
+                new_path = self.directory
+            else:
+                new_path = create_and_return_dir(
+                    os.path.join(self.directory, sanitize_filename(content_name))
+                )
+
+            # --- SKIP OTHER ARTISTS ---
+            # An artist's page also lists releases they only appear on: other
+            # artists' albums, remixes and collaborations credited to someone else.
+            # Dropping them here means they're never downloaded or added to the
+            # database.
+            if artist_page and getattr(self.settings, "skip_other_artists", False):
+                skipped = 0
+                for chunk in content:
+                    albums = chunk.get(type_dict["iterable_key"]) or {}
+                    batch = albums.get("items", [])
+                    albums["items"] = [
+                        item for item in batch
+                        if is_main_artist(item, item_id, content_name)
+                    ]
+                    skipped += len(batch) - len(albums["items"])
+                if skipped:
+                    logger.info(
+                        f"{YELLOW}[*] Skipped {skipped} release(s) by other "
+                        f"artists{OFF}"
+                    )
 
             # --- LABEL INTERSECTION PRE-FILTER ---
             # The artist listing already carries each release's label, so releases from

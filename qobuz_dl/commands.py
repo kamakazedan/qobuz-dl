@@ -288,7 +288,19 @@ def add_common_arg(custom_parser, default_folder, default_quality):
         collections. Prefers explicit versions, then the highest quality, then
         deluxe editions unless most of their extra tracks are live.""",
     )
-    
+    custom_parser.add_argument(
+        "--skip-other-artists",
+        action="store_true",
+        help="""When downloading an artist, skip releases whose main artist is
+        someone else (collaborations, remixes and appearances listed on their page).""",
+    )
+    custom_parser.add_argument(
+        "--no-artist-folder",
+        action="store_true",
+        help="""When downloading an artist, don't put their releases in a folder named
+        after them. Use this when your folder format already starts with {artist}/.""",
+    )
+
     # --- HUMAN BEHAVIOR DELAY ---
     custom_parser.add_argument(
         "--delay",

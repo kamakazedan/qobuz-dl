@@ -166,6 +166,14 @@ disable_smart_truncation = false
 # Set to 'true' to restore classic ASCII character replacements (e.g. replacing '/' with '-')
 legacy_charmap = false
 
+# Set to 'true' to skip releases by other artists (collaborations, remixes and
+# appearances) when downloading an artist; they aren't added to the database either
+skip_other_artists = false
+
+# Set to 'true' to stop artist downloads creating a folder named after the artist;
+# use it when your folder_format already starts with {artist}/
+no_artist_folder = false
+
 # Set to 'true' to disable external .lrc file generation (lyrics will only be embedded in FLAC/MP3 tags)
 no_lrc_files = true
 

@@ -33,6 +33,8 @@ class QobuzDLSettings:
         self.fallback_folder_format = kwargs.get('fallback_folder_format', DEFAULT_FOLDER)
         self.track_format = kwargs.get('track_format')
         self.smart_discography = kwargs.get('smart_discography', False)
+        self.skip_other_artists = kwargs.get('skip_other_artists', False)
+        self.no_artist_folder = kwargs.get('no_artist_folder', False)
         self.legacy_charmap = kwargs.get('legacy_charmap', False)
         
         # tag options
@@ -143,7 +145,9 @@ class QobuzDLSettings:
             'fallback_folder_format': arguments.fallback_folder_format or config.get(section, "fallback_folder_format", fallback=DEFAULT_FOLDER),
             'track_format': arguments.track_format or config.get(section, "track_format", fallback=DEFAULT_TRACK),
             'smart_discography': arguments.smart_discography or config.getboolean(section, "smart_discography", fallback=False),
-            
+            'skip_other_artists': getattr(arguments, 'skip_other_artists', False) or config.getboolean(section, "skip_other_artists", fallback=False),
+            'no_artist_folder': getattr(arguments, 'no_artist_folder', False) or config.getboolean(section, "no_artist_folder", fallback=False),
+
             # cover options
             'embed_art': arguments.embed_art or config.getboolean(section, "embed_art", fallback=True),
             'og_cover': arguments.og_cover or config.getboolean(section, "og_cover", fallback=False),

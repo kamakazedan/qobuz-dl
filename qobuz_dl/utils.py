@@ -236,6 +236,28 @@ def label_matches(label, filter_label):
     return bool(name) and filter_label.lower() in name.lower()
 
 
+def is_main_artist(release, artist_id, artist_name):
+    """
+    Checks whether a release from an artist's page is credited to that artist,
+    rather than being someone else's release they appear on.
+
+    Compares Qobuz artist IDs, falling back to the name (case-insensitive) when
+    the release carries no artist ID.
+
+    Args:
+        release (dict): An album item from the artist's discography listing.
+        artist_id (str | int): The requested artist's Qobuz ID.
+        artist_name (str): The requested artist's name.
+
+    Returns:
+        bool: True if the release's main artist is the requested artist.
+    """
+    artist = release.get("artist") or {}
+    if artist.get("id") is not None and artist_id:
+        return str(artist["id"]) == str(artist_id)
+    return str(artist.get("name") or "").casefold() == str(artist_name).casefold()
+
+
 # --- Smart discography --------------------------------------------------------
 # Titles are matched on whole words, so "Demon Days" isn't taken for a demo and
 # "Alive" isn't taken for a live recording.
@@ -472,11 +494,11 @@ def smart_discography_filter(contents: list, quality=None, get_album=None) -> li
                 cache[album["id"]] = None
         return cache[album["id"]]
 
-    requested_artist = contents[0]["name"]
+    artist_id, artist_name = contents[0].get("id"), contents[0]["name"]
     groups = {}
     # The discography comes in pages of 50 releases; use all of them, not just the first
     for album in (a for page in contents for a in page["albums"]["items"]):
-        if (album.get("artist") or {}).get("name") != requested_artist:
+        if not is_main_artist(album, artist_id, artist_name):
             continue
         if _is_demo(album) or _is_live(album, _release_kind(album) == "album"):
             logger.info(

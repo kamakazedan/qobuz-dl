@@ -238,7 +238,9 @@ def _reset_config(config_file):
     config["qobuz"]["track_format"] = "{track_number} - {track_title}"
     config["qobuz"]["fallback_folder_format"] = "{artist} - {album}"
     config["qobuz"]["smart_discography"] = "false"
-    
+    config["qobuz"]["skip_other_artists"] = "false"
+    config["qobuz"]["no_artist_folder"] = "false"
+
     config["qobuz"]["album_tag_format"] = ""
     config["qobuz"]["date_tag_format"] = ""
     config["qobuz"]["genre_tag_format"] = ""

@@ -263,18 +263,30 @@ def is_main_artist(release, artist_id, artist_name):
 # "Alive" isn't taken for a live recording.
 _DEMO_RE = re.compile(r"\bdemos?\b", re.I)
 _LIVE_RE = re.compile(r"\blive\b", re.I)
+# Brackets around notes in titles: mostly "(Live)" and "[Remastered]", but also
+# "< LIVE >", "{Live}", "【LIVE】" and full-width ones such as "（Live）"
+_OPENING, _CLOSING = "([{<（［｛＜【〈《〔", ")]}>）］｝＞】〉》〕"
+_OPEN, _CLOSE = f"[{re.escape(_OPENING)}]", f"[{re.escape(_CLOSING)}]"
+_BRACKETED = f"{_OPEN}[^{re.escape(_CLOSING)}]*{_CLOSE}"
 # "Live" only marks a live recording in the version field, in a bracketed or
-# dashed suffix ("(Live at Wembley)", "Song - Live"), as "Unplugged" or "In
-# Concert", or at the start of an album-length title ("Live at Leeds"). Titles
-# such as "Live Through This", "Live Forever" and "Long Live" are left alone.
-_LIVE_SUFFIX_RE = re.compile(r"[(\[][^)\]]*\blive\b|\s[-–]\s.*\blive\b", re.I)
+# dashed suffix ("(Live at Wembley)", "Timebomb < LIVE >", "Song - Live"), as
+# "Unplugged" or "In Concert", or at the start of an album-length title ("Live
+# at Leeds"). Titles such as "Live Through This", "Live Forever" and "Long Live"
+# are left alone, and so is "I <3 Live Music": brackets other than ( and [ only
+# count once they're closed.
+_LIVE_SUFFIX_RE = re.compile(
+    r"[(\[][^)\]]*\blive\b"
+    rf"|{_OPEN}[^{re.escape(_CLOSING)}]*\blive\b[^{re.escape(_CLOSING)}]*{_CLOSE}"
+    r"|\s[-–]\s.*\blive\b",
+    re.I,
+)
 _CONCERT_RE = re.compile(r"\b(unplugged|in concert)\b", re.I)
 _LIVE_TITLE_RE = re.compile(r"^\s*live\s+(at|in|from)\b", re.I)
 _REMASTER_RE = re.compile(r"\bremaster(ed|s)?\b", re.I)
 _YEAR_RE = re.compile(r"\b(?:19[5-9]\d|20\d\d)\b")
 # Notes after the title: bracketed ("Album (2011 Remaster)") or after a spaced
 # dash ("Album - 2011 Remaster"). _DASH_NOTE_RE takes only the last dashed part.
-_NOTE_RE = re.compile(r"[(\[][^)\]]*[)\]]|\s[-–—]\s.*$")
+_NOTE_RE = re.compile(rf"{_BRACKETED}|\s[-–—]\s.*$")
 _DASH_NOTE_RE = re.compile(r"\s[-–—]\s(?:(?!\s[-–—]\s).)*$")
 # Notes that only describe the edition; versions that differ only by these are
 # grouped together ("Album (Deluxe Edition)", "Album - Remastered" and "Album").
@@ -369,7 +381,7 @@ def _note_variants(note: str):
     """For a note after the title: None if it's part of the title ("Part 2",
     "Volume 1"), otherwise the variant words it carries (often none)."""
     found = [_variant_word(m.group(0)) for m in _VARIANT_RE.finditer(note)]
-    if found or _EDITION_RE.search(note.strip(" ()[]-–—")):
+    if found or _EDITION_RE.search(note.strip(" -–—" + _OPENING + _CLOSING)):
         return found
     return None
 
@@ -389,7 +401,7 @@ def _group_key(album: dict) -> tuple:
         return ""
 
     title = (album.get("title") or "").replace("’", "'")
-    base = re.sub(r"\s*[(\[][^)\]]*[)\]]", strip_note, title)
+    base = re.sub(rf"\s*{_BRACKETED}", strip_note, title)
     # Dashed notes, from the end: "Album - Remastered - Deluxe Edition" -> "Album"
     while True:
         match = _DASH_NOTE_RE.search(base)

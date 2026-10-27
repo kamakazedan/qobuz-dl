@@ -18,12 +18,21 @@ from qobuz_dl.exceptions import (
 from qobuz_dl.color import GREEN, YELLOW
 
 RESET = "Reset your credentials with 'qobuz-dl -r'"
+PASSWORD_LOGIN_REJECTED = (
+    "Qobuz rejected the email/password login. Qobuz no longer accepts "
+    "password logins from third-party apps, so sign in with your browser's "
+    "auth token instead: run 'qobuz-dl -r' and paste it when asked."
+)
+TOKEN_REJECTED = (
+    "Qobuz rejected your auth token; it has probably expired. Log in at "
+    "https://play.qobuz.com, copy a fresh token and run 'qobuz-dl -r'."
+)
 
 logger = logging.getLogger(__name__)
 
 
 class Client:
-    def __init__(self, email, pwd, app_id, secrets):
+    def __init__(self, email, pwd, app_id, secrets, user_auth_token=None):
         logger.info(f"{YELLOW}Logging...")
         self.secrets = secrets
         self.id = str(app_id)
@@ -38,7 +47,10 @@ class Client:
         )
         self.base = "https://www.qobuz.com/api.json/0.2/"
         self.sec = None
-        self.auth(email, pwd)
+        if user_auth_token:
+            self.auth_with_token(user_auth_token)
+        else:
+            self.auth(email, pwd)
         self.cfg_setup()
 
     def api_call(self, epoint, **kwargs):
@@ -108,7 +120,7 @@ class Client:
         r = self.session.get(self.base + epoint, params=params)
         if epoint == "user/login":
             if r.status_code == 401:
-                raise AuthenticationError("Invalid credentials.\n" + RESET)
+                raise AuthenticationError(PASSWORD_LOGIN_REJECTED)
             elif r.status_code == 400:
                 raise InvalidAppIdError("Invalid app id.\n" + RESET)
             else:
@@ -124,11 +136,34 @@ class Client:
 
     def auth(self, email, pwd):
         usr_info = self.api_call("user/login", email=email, pwd=pwd)
-        if not usr_info["user"]["credential"]["parameters"]:
-            raise IneligibleError("Free accounts are not eligible to download tracks.")
         self.uat = usr_info["user_auth_token"]
         self.session.headers.update({"X-User-Auth-Token": self.uat})
-        self.label = usr_info["user"]["credential"]["parameters"]["short_label"]
+        self._set_membership(usr_info["user"].get("credential"))
+
+    def auth_with_token(self, token):
+        """Sign in with the user_auth_token from a logged-in web player session
+        (Qobuz stopped accepting email/password logins from third-party apps).
+        """
+        self.uat = token
+        self.session.headers.update({"X-User-Auth-Token": token})
+        r = self.session.get(self.base + "user/get", params={"app_id": self.id})
+        if r.status_code == 401:
+            raise AuthenticationError(TOKEN_REJECTED)
+        elif r.status_code == 400:
+            raise InvalidAppIdError(f"Invalid app id: {r.text}\n" + RESET)
+        r.raise_for_status()
+        logger.info(f"{GREEN}Logged: OK")
+        user = r.json()
+        self._set_membership(user.get("user", user).get("credential"))
+
+    def _set_membership(self, credential):
+        # Free accounts come back with empty credential parameters. If the
+        # credential is missing altogether, don't block on it: a free account
+        # will still only get samples, which the downloader skips.
+        if credential is not None and not credential.get("parameters"):
+            raise IneligibleError("Free accounts are not eligible to download tracks.")
+        parameters = (credential or {}).get("parameters") or {}
+        self.label = parameters.get("short_label", "unknown")
         logger.info(f"{GREEN}Membership: {self.label}")
 
     def multi_meta(self, epoint, key, id, type):

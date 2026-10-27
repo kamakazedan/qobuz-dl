@@ -69,8 +69,8 @@ class QobuzDL:
         self.track_format = track_format
         self.smart_discography = smart_discography
 
-    def initialize_client(self, email, pwd, app_id, secrets):
-        self.client = qopy.Client(email, pwd, app_id, secrets)
+    def initialize_client(self, email, pwd, app_id, secrets, user_auth_token=None):
+        self.client = qopy.Client(email, pwd, app_id, secrets, user_auth_token)
         logger.info(f"{YELLOW}Set max quality: {QUALITIES[int(self.quality)]}\n")
 
     def get_tokens(self):

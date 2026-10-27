@@ -21,16 +21,26 @@ Search, explore and download Lossless and Hi-Res music from [Qobuz](https://www.
 > You'll need an **active subscription**
 
 #### Install qobuz-dl with pip
+This fork has fixes that aren't in the PyPI release, so install it from GitHub:
 ##### Linux / MAC OS
 ```
-pip3 install --upgrade qobuz-dl
+pip3 install --upgrade https://github.com/kamakazedan/qobuz-dl/archive/refs/heads/master.zip
 ```
 ##### Windows
 ```
 pip3 install windows-curses
-pip3 install --upgrade qobuz-dl
+pip3 install --upgrade https://github.com/kamakazedan/qobuz-dl/archive/refs/heads/master.zip
 ```
-#### Run qobuz-dl and enter your credentials
+#### Run qobuz-dl and enter your auth token
+Qobuz no longer accepts email/password logins from third-party apps, so
+`qobuz-dl` signs in with the auth token from your browser:
+
+1. Log in at [play.qobuz.com](https://play.qobuz.com).
+2. Press F12 and open **Application** (Chrome/Edge) or **Storage** (Firefox).
+3. Under **Local Storage** > `https://play.qobuz.com`, select `localuser`.
+4. Copy the value of `token` and paste it when `qobuz-dl` asks for it.
+
+Tokens expire; when Qobuz rejects yours, grab a fresh one and run `qobuz-dl -r`.
 ##### Linux / MAC OS
 ```
 qobuz-dl
@@ -158,12 +168,11 @@ from qobuz_dl.core import QobuzDL
 
 logging.basicConfig(level=logging.INFO)
 
-email = "your@email.com"
-password = "your_password"
+token = "your_auth_token"  # see "Run qobuz-dl and enter your auth token"
 
 qobuz = QobuzDL()
 qobuz.get_tokens() # get 'app_id' and 'secrets' attrs
-qobuz.initialize_client(email, password, qobuz.app_id, qobuz.secrets)
+qobuz.initialize_client(None, None, qobuz.app_id, qobuz.secrets, user_auth_token=token)
 
 qobuz.handle_url("https://play.qobuz.com/album/va4j3hdlwaubc")
 ```

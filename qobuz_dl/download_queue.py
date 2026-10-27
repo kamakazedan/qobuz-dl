@@ -168,8 +168,17 @@ def _run(entry: dict) -> int:
         cwd = None
     env = dict(os.environ, **{_CHILD_ENV: "1"})
     kwargs = {}
-    if os.name == "nt" and in_background():
-        kwargs["creationflags"] = _CREATE_NO_WINDOW  # don't pop up a console window
+    if in_background():
+        # Hand the download this process's output, the session log, explicitly.
+        # On Windows it gets a console of its own (hidden by CREATE_NO_WINDOW),
+        # and a process with its own console writes to that console, out of
+        # sight, unless it's given somewhere else to write. Nobody is there to
+        # answer a question either, so its input is empty.
+        sys.stdout.flush()
+        kwargs.update(stdin=subprocess.DEVNULL, stdout=sys.stdout,
+                      stderr=subprocess.STDOUT)
+        if os.name == "nt":
+            kwargs["creationflags"] = _CREATE_NO_WINDOW  # don't pop up a console window
     return subprocess.run(_command(entry), cwd=cwd, env=env, **kwargs).returncode
 
 

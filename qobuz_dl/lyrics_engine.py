@@ -6,6 +6,7 @@ import mutagen
 from mutagen.id3 import ID3, USLT, ID3NoHeaderError
 from mutagen.flac import FLAC
 from qobuz_dl.color import OFF, GREEN, RED, YELLOW, CYAN
+from qobuz_dl.download_queue import in_background
 
 try:
     import lyricsgenius
@@ -44,8 +45,9 @@ class LyricsEngine:
         if match_percentage >= 75.0:
             return True
         elif 60.0 <= match_percentage < 75.0:
-            if is_parallel:
-                print_func(f"    ⚠️ [LYRICS RADAR] Borderline match ({match_percentage:.1f}%). Auto-skipping in parallel mode.")
+            if is_parallel or in_background():
+                mode = "parallel mode" if is_parallel else "the background"
+                print_func(f"    ⚠️ [LYRICS RADAR] Borderline match ({match_percentage:.1f}%). Auto-skipping in {mode}.")
                 return False
             else:
                 print_func(f"\n{YELLOW}    ⚠️ [LYRICS RADAR] Borderline match detected ({match_percentage:.1f}%){OFF}")
@@ -53,7 +55,10 @@ class LyricsEngine:
                 print_func(f"       Found     : {res_artist} - {res_track}")
                 
                 while True:
-                    choice = input(f"       {CYAN}Accept these lyrics? [y/N]: {OFF}").lower().strip()
+                    try:
+                        choice = input(f"       {CYAN}Accept these lyrics? [y/N]: {OFF}").lower().strip()
+                    except EOFError:  # nothing to read an answer from: the default, no
+                        return False
                     if choice in ['y', 'yes']:
                         return True
                     elif choice in ['n', 'no', '']:

@@ -441,8 +441,9 @@ class Client:
             list: A list of successfully matched Qobuz track IDs.
         """
         from qobuz_dl.color import OFF, GREEN, RED, YELLOW, CYAN
+        from qobuz_dl.download_queue import in_background
         import difflib
-        
+
         print(f"{CYAN}[*] Matching Last.fm tracks with Qobuz database (Fuzzy matching & Interactive mode enabled)...{OFF}")
         valid_track_ids = []
         
@@ -487,8 +488,15 @@ class Client:
                         print(f"    Target (Last.fm): {item['artist']} - {item['title']}")
                         print(f"    Found  (Qobuz)  : {best_match_name}")
                         
-                        choice = input(f"{CYAN}    Do you want to download this track anyway? [y/n]: {OFF}").strip().lower()
-                        
+                        if in_background():
+                            print(f"{RED}    [-] Track skipped: there's no one to ask in the background.{OFF}")
+                            continue
+
+                        try:
+                            choice = input(f"{CYAN}    Do you want to download this track anyway? [y/n]: {OFF}").strip().lower()
+                        except EOFError:  # nothing to read an answer from
+                            choice = 'n'
+
                         if choice == 'y':
                             valid_track_ids.append(best_match_id)
                             print(f"{GREEN}    [+] Track accepted manually.{OFF}")

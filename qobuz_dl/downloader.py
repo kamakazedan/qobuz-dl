@@ -931,6 +931,8 @@ class Download:
            
         album_artist_raw = get_album_artist(album_metadata)
         album_artist_str = _flatten_artists(album_artist_raw) if album_artist_raw else track_artist
+        disc = track_metadata.get("media_number") or 1
+        discs = album_metadata.get("media_count") or 1
 
         return {
             "artist": track_artist,
@@ -945,6 +947,10 @@ class Download:
             "track_artist": track_artist,
             "track_composer": _safe_get(track_metadata,"composer", "name"),
             "track_number": f'{track_metadata.get("track_number", 0):02}',
+            # Used by the default multi-disc format. Unpadded ("1.01") unless the
+            # release has 10+ discs ("01.01"), so files still sort in disc order.
+            "disc_number": str(disc).zfill(len(str(discs))),
+            "disc_count": discs,
             "isrc": track_metadata.get("isrc"),
             "bit_depth": track_metadata.get("maximum_bit_depth"),
             "sampling_rate": track_metadata.get("maximum_sampling_rate"),

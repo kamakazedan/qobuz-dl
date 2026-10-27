@@ -10,6 +10,8 @@ import qobuz_dl.metadata as metadata
 from qobuz_dl.color import OFF, GREEN, RED, YELLOW, CYAN
 from qobuz_dl.exceptions import NonStreamable
 
+import re
+
 QL_DOWNGRADE = "FormatRestrictedByFormatAvailability"
 # used in case of error
 DEFAULT_FORMATS = {
@@ -209,7 +211,7 @@ class Download:
         filename = os.path.join(root_dir, f".{tmp_count:02}.tmp")
 
         # Determine the filename
-        track_title = track_metadata.get("title")
+        track_title = re.sub(' +', ' ', sanitize_filename(_get_title(track_metadata)))
         artist = _safe_get(track_metadata, "performer", "name")
         filename_attr = self._get_filename_attr(artist, track_metadata, track_title)
 
@@ -254,8 +256,8 @@ class Download:
     @staticmethod
     def _get_track_attr(meta, track_title, bit_depth, sampling_rate):
         return {
-            "album": sanitize_filename(meta["album"]["title"]),
-            "artist": sanitize_filename(meta["album"]["artist"]["name"]),
+            "album": re.sub(' +', ' ', sanitize_filename(meta["album"]["title"])),
+            "artist": re.sub(' +', ' ', sanitize_filename(meta["album"]["artist"]["name"])),
             "tracktitle": track_title,
             "year": meta["album"]["release_date_original"].split("-")[0],
             "bit_depth": bit_depth,
@@ -265,8 +267,8 @@ class Download:
     @staticmethod
     def _get_album_attr(meta, album_title, file_format, bit_depth, sampling_rate):
         return {
-            "artist": sanitize_filename(meta["artist"]["name"]),
-            "album": sanitize_filename(album_title),
+            "artist": re.sub(' +', ' ', sanitize_filename(meta["artist"]["name"])),
+            "album": re.sub(' +', ' ', sanitize_filename(album_title)),
             "year": meta["release_date_original"].split("-")[0],
             "format": file_format,
             "bit_depth": bit_depth,

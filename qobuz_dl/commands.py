@@ -283,10 +283,10 @@ def add_common_arg(custom_parser, default_folder, default_quality):
         "-s",
         "--smart-discography",
         action="store_true",
-        help="""Try to filter out spam-like albums when requesting an artist's
-        discography, and other optimizations. Filters albums not made by requested
-        artist, and deluxe/live/collection albums. Gives preference to remastered
-        albums, high bit depth/dynamic range, and low sampling rates (to save space).""",
+        help="""When downloading an artist's discography, keep one version of each
+        album or single. Skips releases by other artists, live releases and demo
+        collections. Prefers explicit versions, then the highest quality, then
+        deluxe editions unless most of their extra tracks are live.""",
     )
     
     # --- HUMAN BEHAVIOR DELAY ---

@@ -299,8 +299,8 @@ class QobuzDL:
             if self.smart_discography and url_type == "artist":
                 items = smart_discography_filter(
                     content,
-                    save_space=True,
-                    skip_extras=True,
+                    quality=self.quality,
+                    get_album=self.client.get_album_meta,
                 )
             else:
                 items = []

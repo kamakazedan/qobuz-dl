@@ -236,102 +236,226 @@ def label_matches(label, filter_label):
     return bool(name) and filter_label.lower() in name.lower()
 
 
-def smart_discography_filter(
-    contents: list, save_space: bool = False, skip_extras: bool = False
-) -> list:
-    """
-    Heuristic Engine for intelligent discography filtering.
-    
-    When downloading some artists' discography, many random and spam-like
-    albums can get downloaded. This filters out duplicates and unwanted releases.
+# --- Smart discography --------------------------------------------------------
+# Titles are matched on whole words, so "Demon Days" isn't taken for a demo and
+# "Alive" isn't taken for a live recording.
+_DEMO_RE = re.compile(r"\bdemos?\b", re.I)
+_LIVE_RE = re.compile(r"\blive\b", re.I)
+# "Live" only marks a live recording in the version field, in a bracketed or
+# dashed suffix ("(Live at Wembley)", "Song - Live"), as "Unplugged" or "In
+# Concert", or at the start of an album-length title ("Live at Leeds"). Titles
+# such as "Live Through This", "Live Forever" and "Long Live" are left alone.
+_LIVE_SUFFIX_RE = re.compile(r"[(\[][^)\]]*\blive\b|\s[-–]\s.*\blive\b", re.I)
+_CONCERT_RE = re.compile(r"\b(unplugged|in concert)\b", re.I)
+_LIVE_TITLE_RE = re.compile(r"^\s*live\s+(at|in|from)\b", re.I)
+_REMASTER_RE = re.compile(r"\bremaster(ed|s)?\b", re.I)
+# Bracketed notes that only describe the edition; versions that differ only by
+# these are grouped together ("Album (Deluxe Edition)" with "Album").
+_EDITION_RE = re.compile(
+    r"\b(deluxe|edition|remaster(ed|s)?|expanded|anniversary|explicit|clean"
+    r"|bonus|special|super|collector'?s|reissue|mono|stereo|complete|extended"
+    r"|version)\b|^\W*\d{4}\W*$",
+    re.I,
+)
+# Words that make a release a different recording rather than another edition,
+# so "Song (Acoustic)" isn't grouped with "Song".
+_VARIANT_RE = re.compile(
+    r"\b(remix(es|ed)?|acoustic|instrumentals?|karaoke|a ?cappella|orchestral"
+    r"|reimagined)\b",
+    re.I,
+)
+# A deluxe edition loses to the standard one when more than this share of its
+# extra tracks are live.
+DELUXE_MAX_LIVE_SHARE = 0.5
+# The best (bit depth, kHz) each quality setting downloads.
+_QUALITY_CAPS = {5: (0, 0), 6: (16, 44.1), 7: (24, 96), 27: (24, 192)}
 
-    This function removes:
-        * albums by other artists, which may contain a feature from the requested artist
-        * duplicate albums in different qualities
-        * (optionally) removes collector's, deluxe, live albums
+
+def _is_live(item: dict, album_length: bool = False) -> bool:
+    """Whether a release (or a track) is a live recording."""
+    title, version = item.get("title") or "", item.get("version") or ""
+    return bool(
+        str(item.get("release_type") or "").lower() == "live"
+        or _LIVE_RE.search(version)
+        or _LIVE_SUFFIX_RE.search(title)
+        or _CONCERT_RE.search(f"{title} {version}")
+        or (album_length and _LIVE_TITLE_RE.search(title))
+    )
+
+
+def _is_demo(item: dict) -> bool:
+    text = f"{item.get('title') or ''} {item.get('version') or ''}"
+    return bool(_DEMO_RE.search(text))
+
+
+def _release_kind(album: dict) -> str:
+    """'single' for singles and EPs, otherwise 'album'. Qobuz's own type is
+    unreliable, so 1-3 track releases count as singles whatever they're tagged."""
+    rtype = str(album.get("release_type") or album.get("product_type") or "").lower()
+    tracks = album.get("tracks_count") or 0
+    if rtype in ("single", "ep", "epmini") or 0 < tracks <= 3:
+        return "single"
+    return "album"
+
+
+def _variant_word(word: str) -> str:
+    """'Remixes'/'Remixed' -> 'remix', 'A Cappella' -> 'acappella'."""
+    return re.sub(r"(es|ed|s)$", "", word.lower().replace(" ", ""))
+
+
+def _group_key(album: dict) -> tuple:
+    """Versions of the same release share a key: the title without bracketed
+    notes about the edition, plus any words that make it a different recording
+    ("Acoustic", "Remixes"), whether Qobuz put them in the title or the version.
+    Other bracketed text stays part of the title ("Part 2")."""
+    variants = set()
+
+    def strip_note(match):
+        note = match.group(0)
+        found = [_variant_word(m.group(0)) for m in _VARIANT_RE.finditer(note)]
+        if found or _EDITION_RE.search(note.strip(" ()[]")):
+            variants.update(found)
+            return ""
+        return note
+
+    title = (album.get("title") or "").replace("’", "'")
+    base = re.sub(r"\s*[(\[][^)\]]*[)\]]", strip_note, title)
+    version = album.get("version") or ""
+    variants.update(_variant_word(m.group(0)) for m in _VARIANT_RE.finditer(version))
+    base = re.sub(r"\s+", " ", base).strip().lower()
+    return (_release_kind(album), base, tuple(sorted(variants)))
+
+
+def _quality_cap(quality) -> tuple:
+    try:
+        return _QUALITY_CAPS[int(quality)]
+    except (KeyError, TypeError, ValueError):
+        return (float("inf"), float("inf"))
+
+
+def _track_count(album: dict) -> int:
+    return album.get("tracks_count") or 0
+
+
+def _describe(album: dict) -> str:
+    version = f" ({album['version']})" if album.get("version") else ""
+    explicit = " [E]" if album.get("parental_warning") else ""
+    return (
+        f"{album.get('title')}{version}{explicit} "
+        f"{album.get('maximum_bit_depth')}/{album.get('maximum_sampling_rate')}"
+    )
+
+
+def _edition_score(edition: dict, standard: dict, details) -> int:
+    """2 for an edition with worthwhile extra tracks, 1 for the standard
+    edition, 0 for an edition whose extra tracks are mostly live."""
+    extra = _track_count(edition) - _track_count(standard)
+    if extra <= 0:
+        return 1
+    tracks = (details(edition) or {}).get("tracks", {}).get("items")
+    standard_tracks = (details(standard) or {}).get("tracks", {}).get("items")
+    if tracks is None or standard_tracks is None:
+        return 2  # can't check; give the bigger edition the benefit of the doubt
+    live_extras = sum(map(_is_live, tracks)) - sum(map(_is_live, standard_tracks))
+    return 0 if live_extras / extra > DELUXE_MAX_LIVE_SHARE else 2
+
+
+def _pick_version(versions: list, cap: tuple, details) -> dict:
+    """Choose one of several versions of the same release."""
+
+    def explicit(album):
+        if "parental_warning" not in album:  # not in the listing: look it up
+            album = details(album) or album
+        return bool(album.get("parental_warning"))
+
+    def quality(album):  # what you'd actually get at the chosen quality
+        return (
+            min(album.get("maximum_bit_depth") or 0, cap[0]),
+            min(album.get("maximum_sampling_rate") or 0, cap[1]),
+        )
+
+    # 1. explicit over clean, 2. highest quality
+    ranks = [(explicit(a), quality(a)) for a in versions]
+    top = [a for a, rank in zip(versions, ranks) if rank == max(ranks)]
+
+    # 3. deluxe over standard unless its extras are mostly live,
+    # 4. remaster over original, then more tracks
+    standard = min(top, key=_track_count)
+    scores = {id(a): _edition_score(a, standard, details) for a in top}
+    best = max(
+        top,
+        key=lambda a: (
+            scores[id(a)],
+            bool(_REMASTER_RE.search(f"{a.get('title')} {a.get('version') or ''}")),
+            _track_count(a),
+        ),
+    )
+
+    note = ""
+    if any(score == 0 for score in scores.values()):
+        note = "; skipped a deluxe edition whose extra tracks are mostly live"
+    logger.info(
+        f"{OFF}Smart discography: {_describe(best)} "
+        f"(best of {len(versions)} versions{note})"
+    )
+    return best
+
+
+def smart_discography_filter(contents: list, quality=None, get_album=None) -> list:
+    """
+    Picks one version of each release in an artist's discography.
+
+    Drops releases by other artists, live releases and demo collections, then
+    groups the versions of each album or single (deluxe, explicit, remastered,
+    different qualities) and keeps the best one:
+
+        1. explicit over clean
+        2. the highest quality you'll actually get at the chosen quality setting
+        3. a deluxe/expanded edition over the standard one, unless more than half
+           of its extra tracks are live, in which case the standard one wins
+        4. a remaster over the original, then the version with more tracks
 
     Args:
-        contents (list): Contents returned by Qobuz API.
-        save_space (bool): If True, chooses highest bit depth but lowest sampling rate.
-        skip_extras (bool): If True, removes albums with extra material (i.e. live, deluxe).
+        contents (list): Discography pages returned by the Qobuz API.
+        quality (int, optional): The download quality setting (5, 6, 7 or 27).
+        get_album (callable, optional): Returns an album's full metadata by ID;
+            used to compare the track lists of different editions.
 
     Returns:
         list: The filtered items list.
     """
+    cache = {}
 
-    # for debugging
-    def print_album(album: dict) -> None:
-        logger.debug(
-            f"{album['title']} - {album.get('version', '~~')} "
-            "({album['maximum_bit_depth']}/{album['maximum_sampling_rate']}"
-            " by {album['artist']['name']}) {album['id']}"
-        )
-
-    TYPE_REGEXES = {
-        "remaster": r"(?i)(re)?master(ed)?",
-        "extra": r"(?i)(anniversary|deluxe|live|collector|demo|expanded)",
-    }
-
-    def is_type(album_t: str, album: dict) -> bool:
-        """Check if album is of type `album_t`"""
-        version = album.get("version", "")
-        title = album.get("title", "")
-        regex = TYPE_REGEXES[album_t]
-        return re.search(regex, f"{title} {version}") is not None
-
-    def essence(album: str) -> str:
-        """Ignore text in parens/brackets, return all lowercase.
-        Used to group two albums that may be named similarly, but not exactly
-        the same.
-        """
-        # Skip leading parentheses, e.g. "(What's the Story) Morning Glory?"
-        title = re.sub(r"^\s*(?:\([^)]*\)\s*)+", "", album)
-        r = re.match(r"[^\(]+", title)
-        return (r.group(0) if r else album).strip().lower()
+    def details(album):
+        """Full album metadata, fetched at most once per album."""
+        if get_album is None:
+            return None
+        if album["id"] not in cache:
+            try:
+                cache[album["id"]] = get_album(album["id"])
+            except Exception as e:
+                logger.debug(f"Couldn't fetch album {album['id']}: {e}")
+                cache[album["id"]] = None
+        return cache[album["id"]]
 
     requested_artist = contents[0]["name"]
+    groups = {}
     # The discography comes in pages of 50 releases; use all of them, not just the first
-    items = [album for page in contents for album in page["albums"]["items"]]
-
-    # use dicts to group duplicate albums together by title
-    title_grouped = dict()
-    for item in items:
-        title_ = essence(item["title"])
-        if title_ not in title_grouped:  # ?
-            #            if (t := essence(item["title"])) not in title_grouped:
-            title_grouped[title_] = []
-        title_grouped[title_].append(item)
-
-    items = []
-    for albums in title_grouped.values():
-        best_bit_depth = max(a["maximum_bit_depth"] for a in albums)
-        get_best = min if save_space else max
-        best_sampling_rate = get_best(
-            a["maximum_sampling_rate"]
-            for a in albums
-            if a["maximum_bit_depth"] == best_bit_depth
-        )
-        remaster_exists = any(is_type("remaster", a) for a in albums)
-
-        def is_valid(album: dict) -> bool:
-            return (
-                album["maximum_bit_depth"] == best_bit_depth
-                and album["maximum_sampling_rate"] == best_sampling_rate
-                and album["artist"]["name"] == requested_artist
-                and not (  # states that are not allowed
-                    (remaster_exists and not is_type("remaster", album))
-                    or (skip_extras and is_type("extra", album))
-                )
+    for album in (a for page in contents for a in page["albums"]["items"]):
+        if (album.get("artist") or {}).get("name") != requested_artist:
+            continue
+        if _is_demo(album) or _is_live(album, _release_kind(album) == "album"):
+            logger.info(
+                f"{OFF}Smart discography: skipping {_describe(album)} (live/demo)"
             )
+            continue
+        groups.setdefault(_group_key(album), []).append(album)
 
-        filtered = tuple(filter(is_valid, albums))
-        # most of the time, len is 0 or 1.
-        # if greater, it is a complete duplicate,
-        # so it doesn't matter which is chosen
-        if len(filtered) >= 1:
-            items.append(filtered[0])
-
-    return items
+    cap = _quality_cap(quality)
+    return [
+        versions[0] if len(versions) == 1 else _pick_version(versions, cap, details)
+        for versions in groups.values()
+    ]
 
 
 def format_duration(duration):

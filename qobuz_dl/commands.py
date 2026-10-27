@@ -72,12 +72,51 @@ def lucky_args(subparsers):
         help="number of results to download (default: 1)",
     )
     lucky.add_argument("QUERY", nargs="+", help="search query")
-    lucky.add_argument(
+    add_queue_args(lucky)
+    return lucky
+
+
+def add_queue_args(parser):
+    """Options for commands that queue behind a running download (dl, lucky)."""
+    parser.add_argument(
         "--no-queue",
         action="store_true",
-        help="start now, alongside any download that's already running, instead of queueing",
+        help="start now, in this window, alongside any download that's already running",
     )
-    return lucky
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="download in the background and show its progress (Esc stops watching)",
+    )
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help="download in this window, even if background = true in the config",
+    )
+
+
+def watch_args(subparsers):
+    """Configures the 'watch' subparser: the background download's live output."""
+    return subparsers.add_parser(
+        "watch",
+        description=(
+            "Show the background download's progress as it happens. Esc stops "
+            "watching; the download carries on."
+        ),
+        help="watch the background download",
+    )
+
+
+def stop_args(subparsers):
+    """Configures the 'stop' subparser."""
+    return subparsers.add_parser(
+        "stop",
+        description=(
+            "Stop the download that's running, in the background or in another "
+            "window. Anything queued stays queued."
+        ),
+        help="stop the running download",
+    )
 
 
 def queue_args(subparsers):
@@ -145,11 +184,7 @@ def dl_args(subparsers):
         help="Filter downloads by label name or Qobuz label URL/ID",
     )
     # --- END LABEL INTERSECTION FLAG ---
-    download.add_argument(
-        "--no-queue",
-        action="store_true",
-        help="start now, alongside any download that's already running, instead of queueing",
-    )
+    add_queue_args(download)
 
     return download
 
@@ -613,6 +648,8 @@ def qobuz_dl_args(
     lyrics_cmd = lyrics_args(subparsers)
     sync_pl_cmd = sync_playlist_args(subparsers)
     queue_args(subparsers)
+    watch_args(subparsers)
+    stop_args(subparsers)
 
     [
         add_common_arg(i, default_folder, default_quality)

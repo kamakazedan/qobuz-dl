@@ -246,6 +246,7 @@ def _reset_config(config_file):
     config["qobuz"]["smart_discography"] = "false"
     config["qobuz"]["skip_other_artists"] = "false"
     config["qobuz"]["no_artist_folder"] = "false"
+    config["qobuz"]["background"] = "false"
 
     config["qobuz"]["album_tag_format"] = ""
     config["qobuz"]["date_tag_format"] = ""
@@ -562,11 +563,26 @@ def main():
 
     # --- DOWNLOAD QUEUE ---
     # A dl/lucky started while another one is downloading joins the queue and
-    # exits; the running qobuz-dl starts it when it's done (see download_queue.py).
+    # exits; the running qobuz-dl starts it when it's done. With background = true
+    # the download runs detached and this window shows its progress until you
+    # press Esc (see download_queue.py).
     download_queue = DownloadQueue(CONFIG_PATH)
-    if arguments.command == "queue":
+    if arguments.command in ("queue", "watch", "stop"):
         try:
-            queue_command(download_queue, run=arguments.run, clear=arguments.clear)
+            if arguments.command == "queue":
+                queue_command(download_queue, run=arguments.run, clear=arguments.clear)
+            elif arguments.command == "watch":
+                download_queue.watch()
+            elif download_queue.stop():
+                left = len(download_queue.entries())
+                print(f"{YELLOW}[queue] Stopped the download.{OFF}")
+                if left:
+                    print(
+                        f"{left} item(s) still queued: 'qobuz-dl queue --run' carries "
+                        "on, 'qobuz-dl queue --clear' drops them."
+                    )
+            else:
+                print("[queue] Nothing is downloading.")
         except KeyboardInterrupt:
             pass
         sys.exit(0)
@@ -575,6 +591,22 @@ def main():
         and not getattr(arguments, "no_queue", False)
         and not is_queued_run()
     ):
+        try:
+            background = config.getboolean(section, "background", fallback=False)
+        except ValueError:
+            background = False
+        background = (background or getattr(arguments, "background", False)) and not (
+            getattr(arguments, "foreground", False)
+        )
+        if background:
+            position, running = download_queue.enqueue(sys.argv[1:], os.getcwd())
+            if running:
+                print(f"{YELLOW}[queue] Added to the queue (position {position}).{OFF}")
+            else:
+                download_queue.start_background()
+                print(f"{YELLOW}[queue] Downloading in the background.{OFF}")
+            download_queue.watch(wait=0 if running else 15)
+            sys.exit(0)
         position = download_queue.enqueue_if_busy(sys.argv[1:], os.getcwd())
         if position:
             print(

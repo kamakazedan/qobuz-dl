@@ -366,6 +366,19 @@ qobuz-dl queue --run              # start the queue if nothing is running
 qobuz-dl queue --clear            # empty the queue
 ```
 
+**Background downloads.** With `background = true` in `config.ini` (or `--background`
+on a single command), `dl` and `lucky` download in the background and show their
+progress live. Press **Esc** to stop watching: you get the prompt back, the download
+carries on, and you can queue more. Ctrl+C no longer reaches the download, so use
+`qobuz-dl stop` to end it.
+```bash
+qobuz-dl dl "URL"                 # starts in the background and shows its progress
+qobuz-dl dl "URL2"                # queued behind it; shows the progress too
+qobuz-dl watch                    # show the progress again (from any window)
+qobuz-dl stop                     # stop the download; the queue is kept
+qobuz-dl dl "URL" --foreground    # this one runs in the window instead
+```
+
 ### 🗄️ Database & Library Management
 The Ultimate Edition includes powerful local library managers to keep track of your downloads, prevent duplicates, and retroactively fix your metadata.
 

@@ -291,9 +291,23 @@ _VARIANT_RE = re.compile(
     r"|reimagined)\b",
     re.I,
 )
+# Unfinished or archival recordings, as bonus tracks are often labelled:
+# "(Roger's Demo)", "(Alternate Version)", "(Take 1)", "(Rough Mix)", ...
+_OUTTAKE_RE = re.compile(
+    r"\b(demos?|outtakes?|alternate (take|version|mix)|alt\.? (take|version)"
+    r"|take \d+|rough mix|early (take|version|mix)|rehearsal|work in progress)\b",
+    re.I,
+)
+# "Wish You Were Here 50th Anniversary Edition", without brackets or a dash
+_ANNIVERSARY_PHRASE_RE = re.compile(r"\s+\d{1,3}(st|nd|rd|th)\s+anniversary\b.*$", re.I)
+# "Wish You Were Here 50": a round number of years after the title
+_ANNIVERSARY_NUMBER_RE = re.compile(r"^(?P<base>.*\S)\s+(?P<years>\d{2,3})$")
 # A deluxe edition loses to the standard one when more than this share of its
-# extra tracks are live.
-DELUXE_MAX_LIVE_SHARE = 0.5
+# extra tracks are live recordings, demos or other outtakes.
+DELUXE_MAX_UNWANTED_SHARE = 0.5
+# An album counts as a live (or demo) album, and is skipped, when at least this
+# share of its tracks are live recordings or demos.
+LIVE_ALBUM_SHARE = 0.8
 # The best (bit depth, kHz) each quality setting downloads.
 _QUALITY_CAPS = {5: (0, 0), 6: (16, 44.1), 7: (24, 96), 27: (24, 192)}
 
@@ -313,6 +327,27 @@ def _is_live(item: dict, album_length: bool = False) -> bool:
 def _is_demo(item: dict) -> bool:
     text = f"{item.get('title') or ''} {item.get('version') or ''}"
     return bool(_DEMO_RE.search(text))
+
+
+def _is_unwanted_bonus(track: dict) -> bool:
+    """A live recording, demo or other outtake: the bonus material that pads
+    out many deluxe and anniversary editions."""
+    text = f"{track.get('title') or ''} {track.get('version') or ''}"
+    return _is_live(track) or bool(_OUTTAKE_RE.search(text))
+
+
+def _mostly_live_or_demo(full_album) -> bool:
+    """Whether an album's tracks show it's a live album or a demo collection,
+    when its title doesn't ("Pink Floyd at Pompeii - MCMLXXII")."""
+    if not full_album:
+        return False
+    if str(full_album.get("release_type") or "").lower() == "live":
+        return True
+    tracks = (full_album.get("tracks") or {}).get("items") or []
+    if not tracks:
+        return False
+    hits = sum(1 for track in tracks if _is_live(track) or _is_demo(track))
+    return hits / len(tracks) >= LIVE_ALBUM_SHARE
 
 
 def _release_kind(album: dict) -> str:
@@ -363,10 +398,27 @@ def _group_key(album: dict) -> tuple:
             break
         variants.update(found)
         base = base[: match.start()]
+    base = _ANNIVERSARY_PHRASE_RE.sub("", base)
     version = album.get("version") or ""
     variants.update(_variant_word(m.group(0)) for m in _VARIANT_RE.finditer(version))
     base = re.sub(r"\s+", " ", base).strip().lower()
     return (_release_kind(album), base, tuple(sorted(variants)))
+
+
+def _merge_anniversary_numbers(groups: dict):
+    """Fold "Wish You Were Here 50" into "Wish You Were Here": a title that's
+    another release's title plus a round number of years (10, 15, 20, ...) is
+    an anniversary edition of it. Sequels like "Tubular Bells 2" don't qualify,
+    and nothing is folded unless the plain title is in the discography too."""
+    for key in list(groups):
+        kind, base, variants = key
+        match = _ANNIVERSARY_NUMBER_RE.match(base)
+        if not match:
+            continue
+        years = int(match.group("years"))
+        target = (kind, match.group("base"), variants)
+        if years >= 10 and years % 5 == 0 and target in groups:
+            groups[target].extend(groups.pop(key))
 
 
 def _quality_cap(quality) -> tuple:
@@ -408,7 +460,8 @@ def _describe(album: dict) -> str:
 
 def _edition_score(edition: dict, standard: dict, details) -> int:
     """2 for an edition with worthwhile extra tracks, 1 for the standard
-    edition, 0 for an edition whose extra tracks are mostly live."""
+    edition, 0 for an edition whose extra tracks are mostly live recordings,
+    demos or outtakes."""
     extra = _track_count(edition) - _track_count(standard)
     if extra <= 0:
         return 1
@@ -416,8 +469,10 @@ def _edition_score(edition: dict, standard: dict, details) -> int:
     standard_tracks = (details(standard) or {}).get("tracks", {}).get("items")
     if tracks is None or standard_tracks is None:
         return 2  # can't check; give the bigger edition the benefit of the doubt
-    live_extras = sum(map(_is_live, tracks)) - sum(map(_is_live, standard_tracks))
-    return 0 if live_extras / extra > DELUXE_MAX_LIVE_SHARE else 2
+    unwanted = sum(map(_is_unwanted_bonus, tracks)) - sum(
+        map(_is_unwanted_bonus, standard_tracks)
+    )
+    return 0 if unwanted / extra > DELUXE_MAX_UNWANTED_SHARE else 2
 
 
 def _pick_version(versions: list, cap: tuple, details) -> dict:
@@ -434,21 +489,29 @@ def _pick_version(versions: list, cap: tuple, details) -> dict:
             min(album.get("maximum_sampling_rate") or 0, cap[1]),
         )
 
-    # 1. explicit over clean, 2. highest quality
-    ranks = [(explicit(a), quality(a)) for a in versions]
+    # 1. explicit over clean, but only if the album itself is explicit, i.e. its
+    # standard edition comes in an explicit version. An edition can also be
+    # flagged explicit just for a bonus track (a live recording with a swear in
+    # it), and that shouldn't beat a better-sounding original.
+    fewest = min(_track_count(a) for a in versions)
+    explicit_album = any(explicit(a) for a in versions if _track_count(a) == fewest)
+    # 2. highest quality
+    ranks = [(explicit(a) if explicit_album else False, quality(a)) for a in versions]
     top = [a for a, rank in zip(versions, ranks) if rank == max(ranks)]
 
-    # 3. deluxe over standard unless its extras are mostly live,
+    # 3. deluxe over standard unless its extras are mostly live/demos/outtakes,
+    # then explicit over clean if that wasn't decided above,
     # 4. newest remaster over older ones and the original, then more tracks
     standard = min(top, key=_track_count)
     scores = {id(a): _edition_score(a, standard, details) for a in top}
     best = max(
-        top, key=lambda a: (scores[id(a)], _remaster_rank(a), _track_count(a))
+        top,
+        key=lambda a: (scores[id(a)], explicit(a), _remaster_rank(a), _track_count(a)),
     )
 
     note = ""
     if any(score == 0 for score in scores.values()):
-        note = "; skipped a deluxe edition whose extra tracks are mostly live"
+        note = "; skipped an edition padded with live tracks, demos or outtakes"
     logger.info(
         f"{OFF}Smart discography: {_describe(best)} "
         f"(best of {len(versions)} versions{note})"
@@ -460,14 +523,16 @@ def smart_discography_filter(contents: list, quality=None, get_album=None) -> li
     """
     Picks one version of each release in an artist's discography.
 
-    Drops releases by other artists, live releases and demo collections, then
-    groups the versions of each album or single (deluxe, explicit, remastered,
+    Drops releases by other artists, live albums and demo collections (judged
+    by their titles, and for albums also by their track lists), then groups the
+    versions of each album or single (deluxe, anniversary, explicit, remastered,
     different qualities) and keeps the best one:
 
-        1. explicit over clean
+        1. explicit over clean, when the album itself is explicit
         2. the highest quality you'll actually get at the chosen quality setting
-        3. a deluxe/expanded edition over the standard one, unless more than half
-           of its extra tracks are live, in which case the standard one wins
+        3. a deluxe/anniversary edition over the standard one, unless more than
+           half of its extra tracks are live recordings, demos or outtakes, in
+           which case the standard one wins
         4. the newest remaster over older ones and the original, then the
            version with more tracks
 
@@ -500,12 +565,18 @@ def smart_discography_filter(contents: list, quality=None, get_album=None) -> li
     for album in (a for page in contents for a in page["albums"]["items"]):
         if not is_main_artist(album, artist_id, artist_name):
             continue
-        if _is_demo(album) or _is_live(album, _release_kind(album) == "album"):
+        is_album = _release_kind(album) == "album"
+        if (
+            _is_demo(album)
+            or _is_live(album, is_album)
+            or (is_album and _mostly_live_or_demo(details(album)))
+        ):
             logger.info(
                 f"{OFF}Smart discography: skipping {_describe(album)} (live/demo)"
             )
             continue
         groups.setdefault(_group_key(album), []).append(album)
+    _merge_anniversary_numbers(groups)
 
     cap = _quality_cap(quality)
     return [

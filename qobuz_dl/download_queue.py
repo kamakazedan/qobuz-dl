@@ -12,8 +12,9 @@ so closing qobuz-dl or a crash loses nothing: the next download, or
 `qobuz-dl queue --run`, picks up what's left.
 
 With `background = true` in the config, dl/lucky hand their work to a detached
-`qobuz-dl queue --run` and show its live output (`watch`); Esc stops watching and
-gives the prompt back while the download carries on. `qobuz-dl stop` ends it.
+`qobuz-dl queue --run` and give the prompt straight back. `qobuz-dl watch` (or
+--watch on the command) shows its live output; Esc stops watching while the
+download carries on. `qobuz-dl stop` ends it.
 
 Files, all in the config folder:
   queue.jsonl  the queue, one JSON entry per line
@@ -197,15 +198,18 @@ class DownloadQueue:
         self.logs = os.path.join(folder, "logs")
         self._queue_lock = _FileLock(os.path.join(folder, "queue.lock"))
         self._worker_lock = _FileLock(os.path.join(folder, "worker.lock"))
+        self._holding_queue_lock = False
         self.is_worker = False
 
     # --- the queue file (only touched while holding the queue lock) ---------
     @contextmanager
     def _locked(self):
         self._queue_lock.acquire()
+        self._holding_queue_lock = True
         try:
             yield
         finally:
+            self._holding_queue_lock = False
             self._queue_lock.release()
 
     def _read(self) -> list:
@@ -257,6 +261,12 @@ class DownloadQueue:
 
     # --- who's downloading ----------------------------------------------------
     def _worker_held(self) -> bool:
+        # Checking means taking the worker slot for a moment, so it's done under
+        # the queue lock, as taking the slot for real is: a qobuz-dl that's just
+        # starting can't then mistake the check for a running worker and give up.
+        if not self._holding_queue_lock:
+            with self._locked():
+                return self._worker_held()
         probe = _FileLock(self._worker_lock.path)
         if probe.acquire(blocking=False):
             probe.release()
@@ -387,6 +397,16 @@ class DownloadQueue:
             )
         return log_path
 
+    def wait_for_worker(self, timeout=15.0, poll=0.1) -> bool:
+        """After start_background(): give it up to `timeout` seconds to get going.
+        True once a qobuz-dl is downloading, or the queue has already been run."""
+        deadline = time.time() + timeout
+        while not (self.is_running() or not self.entries()):
+            if time.time() >= deadline:
+                return False
+            time.sleep(poll)
+        return True
+
     def _prune_logs(self, keep):
         logs = sorted(glob.glob(os.path.join(self.logs, "session-*.log")),
                       key=os.path.getmtime)
@@ -446,7 +466,7 @@ class DownloadQueue:
                         out.flush()
                     if key_reader.escape_pressed():
                         print(f"\n{YELLOW}[watch] Stopped watching. The download "
-                              "carries on; 'qobuz-dl watch' shows it again.{OFF}")
+                              f"carries on; 'qobuz-dl watch' shows it again.{OFF}")
                         return
                     info = self.worker_info()
                     if info is None:

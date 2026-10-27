@@ -86,7 +86,13 @@ def add_queue_args(parser):
     parser.add_argument(
         "--background",
         action="store_true",
-        help="download in the background and show its progress (Esc stops watching)",
+        help="download in the background and give the prompt straight back",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="download in the background and show its progress, like 'qobuz-dl "
+        "watch' (Esc stops watching; the download carries on)",
     )
     parser.add_argument(
         "--foreground",

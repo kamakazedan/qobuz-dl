@@ -564,8 +564,8 @@ def main():
     # --- DOWNLOAD QUEUE ---
     # A dl/lucky started while another one is downloading joins the queue and
     # exits; the running qobuz-dl starts it when it's done. With background = true
-    # the download runs detached and this window shows its progress until you
-    # press Esc (see download_queue.py).
+    # the download runs detached and the prompt comes straight back; 'qobuz-dl
+    # watch' or --watch shows its progress (see download_queue.py).
     download_queue = DownloadQueue(CONFIG_PATH)
     if arguments.command in ("queue", "watch", "stop"):
         try:
@@ -595,17 +595,24 @@ def main():
             background = config.getboolean(section, "background", fallback=False)
         except ValueError:
             background = False
-        background = (background or getattr(arguments, "background", False)) and not (
-            getattr(arguments, "foreground", False)
-        )
+        watch = getattr(arguments, "watch", False)
+        background = (
+            background or getattr(arguments, "background", False) or watch
+        ) and not getattr(arguments, "foreground", False)
         if background:
             position, running = download_queue.enqueue(sys.argv[1:], os.getcwd())
             if running:
                 print(f"{YELLOW}[queue] Added to the queue (position {position}).{OFF}")
             else:
                 download_queue.start_background()
-                print(f"{YELLOW}[queue] Downloading in the background.{OFF}")
-            download_queue.watch(wait=0 if running else 15)
+                if download_queue.wait_for_worker():
+                    hint = "" if watch else " 'qobuz-dl watch' shows its progress."
+                    print(f"{YELLOW}[queue] Downloading in the background.{hint}{OFF}")
+                else:
+                    print(f"{YELLOW}[queue] Queued, but the background download hasn't "
+                          f"started yet. 'qobuz-dl watch' shows what it's doing.{OFF}")
+            if watch:
+                download_queue.watch(wait=0 if running else 15)
             sys.exit(0)
         position = download_queue.enqueue_if_busy(sys.argv[1:], os.getcwd())
         if position:

@@ -362,6 +362,7 @@ typed in), and stays queued until it has run, so closing the window loses nothin
 qobuz-dl dl "URL"                 # in a second window: queued
 qobuz-dl dl "URL" --no-queue      # run now, alongside the other download
 qobuz-dl status                   # what's downloading, how far it's got, what's next
+qobuz-dl status --watch           # the same, kept up to date every second until Esc
 qobuz-dl queue                    # list what's queued
 qobuz-dl queue --run              # start the queue if nothing is running
 qobuz-dl queue --clear            # empty the queue
@@ -378,6 +379,8 @@ qobuz-dl queue --clear            # empty the queue
 ```
 How far it's got comes from the background log, so for a download running in a
 window of its own, `status` shows what it's running and what's queued after it.
+`qobuz-dl status --watch` keeps the summary on screen and updates it in place every
+second; press **Esc** to stop watching (the download carries on).
 
 **Background downloads.** With `background = true` in `config.ini` (or `--background`
 on a single command), `dl` and `lucky` download in the background and give you the

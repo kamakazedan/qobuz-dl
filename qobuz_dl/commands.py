@@ -127,7 +127,7 @@ def stop_args(subparsers):
 
 def status_args(subparsers):
     """Configures the 'status' subparser: a quick summary of downloads and the queue."""
-    return subparsers.add_parser(
+    status = subparsers.add_parser(
         "status",
         description=(
             "Show what's downloading and how far it's got (release, track, percent), "
@@ -135,6 +135,12 @@ def status_args(subparsers):
         ),
         help="quick summary of the download and the queue",
     )
+    status.add_argument(
+        "--watch",
+        action="store_true",
+        help="keep it on screen, updated every second, until you press Esc",
+    )
+    return status
 
 
 def queue_args(subparsers):

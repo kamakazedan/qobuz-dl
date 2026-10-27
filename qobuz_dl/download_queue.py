@@ -17,7 +17,8 @@ With `background = true` in the config, dl/lucky hand their work to a detached
 download carries on. `qobuz-dl stop` ends it.
 
 `qobuz-dl status` sums it up: what's downloading, how far it's got (from the
-background log), and what's queued.
+background log), and what's queued. `status --watch` keeps that on screen,
+updated every second, until Esc.
 
 Files, all in the config folder:
   queue.jsonl  the queue, one JSON entry per line
@@ -34,13 +35,15 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 from contextlib import contextmanager
 
-from qobuz_dl.color import CYAN, GREEN, YELLOW, OFF
+from qobuz_dl.color import CYAN, GREEN, YELLOW, OFF, RESET
 
 # Commands that wait their turn. Interactive mode needs you at the keyboard, so
 # it never queues and isn't held up by the queue.
@@ -308,6 +311,103 @@ def _progress_lines(progress: dict) -> list:
             lines.append(f"Now: {progress['file']}"
                          + (f", {percent}%" if percent is not None else "") + done)
     return lines
+
+
+def _report(snapshot: dict, max_queued=None) -> list:
+    """The status as (colour, text) lines. max_queued: list at most that many of
+    the queued commands."""
+    info, current, waiting = snapshot["info"], snapshot["current"], snapshot["waiting"]
+    if info is None and not waiting:
+        return [(GREEN, "[status] Nothing is downloading, and nothing is queued.")]
+    lines = []
+    if info is None:
+        lines.append((YELLOW, "[status] Nothing is downloading."))
+    elif info == {}:
+        lines.append((CYAN, "[status] A download is just starting."))
+    else:
+        where = "in the background" if info.get("background") else "in another window"
+        since = current.get("since")
+        took = f", for {_duration(time.time() - since)}" if since else ""
+        lines.append((CYAN, f"[status] Downloading {where}{took}:"))
+        progress = snapshot["progress"]
+        if not current.get("argv"):
+            lines.append(("", "  Getting the next download ready."))
+        elif progress is not None:
+            name = f"   ({progress['source']})" if progress.get("source") else ""
+            lines.append(("", f"  qobuz-dl {describe(current)}{name}"))
+            lines += [("", f"  {line}") for line in _progress_lines(progress)]
+        else:
+            lines.append(("", f"  qobuz-dl {describe(current)}"))
+            lines.append(("", "  (that window shows how far it's got)"))
+    if waiting:
+        heading = ("Queued next" if info is not None
+                   else "Queued, waiting for 'qobuz-dl queue --run'")
+        lines.append((YELLOW, f"[status] {heading} ({len(waiting)}):"))
+        listed = waiting if max_queued is None else waiting[:max_queued]
+        for number, entry in enumerate(listed, 1):
+            lines.append(("", f"  {number}. qobuz-dl {describe(entry)}   "
+                              f"(added {_when(entry.get('added'))})"))
+        if len(listed) < len(waiting):
+            lines.append(("", f"  … and {len(waiting) - len(listed)} more"))
+    elif info is not None:
+        lines.append(("", "[status] Nothing else queued."))
+    return lines
+
+
+def _paint(colour, text) -> str:
+    return f"{colour}{text}{RESET}" if colour else text
+
+
+def _is_terminal(stream) -> bool:
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _cells(text) -> int:
+    """How many columns text takes up in a terminal (CJK characters take two)."""
+    return sum(0 if unicodedata.combining(ch)
+               else 2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def _fit(text, width) -> str:
+    """text cut to `width` columns, ending in … if it had to be cut."""
+    if _cells(text) <= width:
+        return text
+    kept, used = [], 0
+    for ch in text:
+        used += _cells(ch)
+        if used > width - 1:
+            break
+        kept.append(ch)
+    return "".join(kept) + "…"
+
+
+def _rows(lines, width) -> int:
+    """Terminal rows that (colour, text) lines take up at `width` columns. They're
+    cut to fit when drawn, but the window may have been narrowed since."""
+    width = max(1, width)
+    return sum(max(1, -(-_cells(text) // width)) for _, text in lines)
+
+
+def _frame(snapshot, footer, width, height) -> list:
+    """The live status as it fits the terminal: no line wider than it (so none
+    wraps), and few enough lines that it never scrolls; a long queue is shortened."""
+    room = max(2, height - 1)  # the cursor waits on the row below
+    lines = _report(snapshot)
+    if len(lines) + 1 > room and snapshot["waiting"]:
+        keep = len(snapshot["waiting"]) - (len(lines) + 1 - room) - 1  # -1: "… and N more"
+        lines = _report(snapshot, max_queued=max(0, keep))
+    lines = lines[:room - 1] + [footer]
+    return [(colour, _fit(text, width - 1)) for colour, text in lines]
+
+
+def _redraw(lines, up) -> str:
+    """Go back up `up` rows to the previous update, draw the lines over it, and
+    clear anything of it that's left below."""
+    return (f"\r\x1b[{up}A" if up else "\r") + "".join(
+        _paint(colour, text) + "\x1b[K\n" for colour, text in lines) + "\x1b[J"
 
 
 def _duration(seconds) -> str:
@@ -666,54 +766,55 @@ class DownloadQueue:
             time.sleep(0.1)
         return True
 
-    def status(self, out=None):
-        """`qobuz-dl status`: what's downloading, how far it's got, and what's
-        queued. How far it's got comes from the background log, so for a download
-        running in another window it's just what it's running."""
-        out = out or sys.stdout
-
-        def say(text):
-            out.write(text + "\n")
-
+    def _snapshot(self) -> dict:
+        """What `qobuz-dl status` shows, read afresh."""
         info = self.worker_info()
         entries = self.entries()
         current = (info or {}).get("current") or {}
         if info and info.get("background") and not current and entries:
             current = entries[0]  # a background qobuz-dl runs the queue in order
+        progress = None  # how far it's got: only known for background downloads
+        if info and info.get("background") and current.get("argv"):
+            progress = read_progress(_read_tail(info.get("log") or ""))
         waiting = [e for e in entries if not current.get("id") or e.get("id") != current["id"]]
+        return {"info": info, "current": current, "progress": progress, "waiting": waiting}
 
-        if info is None:
-            if not entries:
-                say(f"{GREEN}[status] Nothing is downloading, and nothing is queued.{OFF}")
-                return
-            say(f"{YELLOW}[status] Nothing is downloading.{OFF}")
-        elif info == {}:
-            say(f"{CYAN}[status] A download is just starting.{OFF}")
-        else:
-            where = "in the background" if info.get("background") else "in another window"
-            since = current.get("since")
-            took = f", for {_duration(time.time() - since)}" if since else ""
-            say(f"{CYAN}[status] Downloading {where}{took}:{OFF}")
-            if not current.get("argv"):
-                say("  Getting the next download ready.")
-            elif info.get("background"):
-                progress = read_progress(_read_tail(info.get("log") or ""))
-                name = f"   ({progress['source']})" if progress.get("source") else ""
-                say(f"  qobuz-dl {describe(current)}{name}")
-                for line in _progress_lines(progress):
-                    say(f"  {line}")
-            else:
-                say(f"  qobuz-dl {describe(current)}")
-                say("  (that window shows how far it's got)")
+    def status(self, out=None, live=False, keys=None, interval=1.0, poll=0.1):
+        """`qobuz-dl status`: what's downloading, how far it's got, and what's
+        queued. How far it's got comes from the background log, so for a download
+        running in another window it's just what it's running.
 
-        if waiting:
-            heading = ("Queued next" if info is not None
-                       else "Queued, waiting for 'qobuz-dl queue --run'")
-            say(f"{YELLOW}[status] {heading} ({len(waiting)}):{OFF}")
-            for number, entry in enumerate(waiting, 1):
-                say(f"  {number}. qobuz-dl {describe(entry)}   (added {_when(entry.get('added'))})")
-        elif info is not None:
-            say("[status] Nothing else queued.")
+        live (`status --watch`): keep it on screen, updated every `interval`
+        seconds, until Esc (or q, or Ctrl+C). Needs a terminal; elsewhere the
+        status is shown once."""
+        out = out or sys.stdout
+        if live and _is_terminal(out):
+            self._live_status(out, keys or _KeyReader(), interval, poll)
+            return
+        for colour, text in _report(self._snapshot()):
+            out.write(_paint(colour, text) + "\n")
+
+    def _live_status(self, out, keys, interval, poll):
+        shown = []  # the lines on screen, to draw the next update over
+        try:
+            with keys as key_reader:
+                next_update = 0.0
+                while not key_reader.escape_pressed():
+                    if time.monotonic() >= next_update:
+                        width, height = shutil.get_terminal_size()
+                        footer = ("", f"[status] Updated {time.strftime('%H:%M:%S')}. "
+                                      "Press Esc to stop watching.")
+                        frame = _frame(self._snapshot(), footer, width, height)
+                        out.write(_redraw(frame, _rows(shown, width)))
+                        out.flush()
+                        shown, next_update = frame, time.monotonic() + interval
+                    time.sleep(poll)
+        except KeyboardInterrupt:
+            pass
+        if shown:  # the last update stays on screen; its footer makes way for this
+            out.write("\x1b[1A\r\x1b[K")
+        out.write(_paint(YELLOW, "[status] Stopped watching.") + "\n")
+        out.flush()
 
 
 def queue_command(queue: DownloadQueue, run=False, clear=False):

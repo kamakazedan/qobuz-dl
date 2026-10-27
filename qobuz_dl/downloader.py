@@ -246,6 +246,7 @@ class Download:
         album_tag_format: str = "",
         date_tag_format: str = "",
         genre_tag_format: str = "",
+        skip_discs=None,
     ):
         """
         Initializes the Download class.
@@ -303,7 +304,9 @@ class Download:
         self.album_tag_format = album_tag_format
         self.date_tag_format = date_tag_format
         self.genre_tag_format = genre_tag_format
-        
+        # Discs to leave out, e.g. live discs that smart discography skips
+        self.skip_discs = set(skip_discs or ())
+
         self._original_folder_format = folder_format or DEFAULT_FOLDER
         self._original_track_format = track_format or DEFAULT_TRACK
         self._original_multiple_disc_track_format = settings.multiple_disc_track_format if settings else DEFAULT_MULTIPLE_DISC_TRACK
@@ -475,11 +478,20 @@ class Download:
                 
                 return
              
+            if self.skip_discs:
+                discs = ", ".join(map(str, sorted(self.skip_discs)))
+                safe_print(
+                    f"{YELLOW}[*] Leaving out disc(s) {discs}: live recordings "
+                    f"or demos.{OFF}"
+                )
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=active_workers) as executor:
                 futures = []
                 for i in album_meta["tracks"]["items"]:
                     if abort_event.is_set():
                         break
+                    if (i.get("media_number") or 1) in self.skip_discs:
+                        continue  # not a failure: the album still counts as complete
                     try:
                         parse = self.client.get_track_url(i["id"], fmt_id=self.quality)
                     except Exception as e:

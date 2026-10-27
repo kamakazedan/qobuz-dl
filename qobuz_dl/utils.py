@@ -305,9 +305,10 @@ _ANNIVERSARY_NUMBER_RE = re.compile(r"^(?P<base>.*\S)\s+(?P<years>\d{2,3})$")
 # A deluxe edition loses to the standard one when more than this share of its
 # extra tracks are live recordings, demos or other outtakes.
 DELUXE_MAX_UNWANTED_SHARE = 0.5
-# An album counts as a live (or demo) album, and is skipped, when at least this
-# share of its tracks are live recordings or demos.
-LIVE_ALBUM_SHARE = 0.8
+# A disc counts as live (or demos) when at least this share of its tracks are
+# live recordings or demos. Smart discography doesn't download such discs, and
+# skips an album outright when every disc is like that.
+LIVE_DISC_SHARE = 0.8
 # The best (bit depth, kHz) each quality setting downloads.
 _QUALITY_CAPS = {5: (0, 0), 6: (16, 44.1), 7: (24, 96), 27: (24, 192)}
 
@@ -336,18 +337,17 @@ def _is_unwanted_bonus(track: dict) -> bool:
     return _is_live(track) or bool(_OUTTAKE_RE.search(text))
 
 
-def _mostly_live_or_demo(full_album) -> bool:
-    """Whether an album's tracks show it's a live album or a demo collection,
-    when its title doesn't ("Pink Floyd at Pompeii - MCMLXXII")."""
-    if not full_album:
-        return False
-    if str(full_album.get("release_type") or "").lower() == "live":
-        return True
-    tracks = (full_album.get("tracks") or {}).get("items") or []
-    if not tracks:
-        return False
-    hits = sum(1 for track in tracks if _is_live(track) or _is_demo(track))
-    return hits / len(tracks) >= LIVE_ALBUM_SHARE
+def _live_discs(tracks: list) -> set:
+    """The discs (media numbers) that are mostly live recordings or demos."""
+    discs = {}
+    for track in tracks:
+        discs.setdefault(track.get("media_number") or 1, []).append(track)
+    return {
+        disc
+        for disc, items in discs.items()
+        if sum(1 for t in items if _is_live(t) or _is_demo(t)) / len(items)
+        >= LIVE_DISC_SHARE
+    }
 
 
 def _release_kind(album: dict) -> str:
@@ -458,24 +458,26 @@ def _describe(album: dict) -> str:
     )
 
 
-def _edition_score(edition: dict, standard: dict, details) -> int:
+def _edition_score(edition: dict, standard: dict, kept) -> int:
     """2 for an edition with worthwhile extra tracks, 1 for the standard
     edition, 0 for an edition whose extra tracks are mostly live recordings,
-    demos or outtakes."""
-    extra = _track_count(edition) - _track_count(standard)
-    if extra <= 0:
+    demos or outtakes. Only the tracks that would be downloaded count, so a
+    live disc that's left out doesn't count against an edition."""
+    if _track_count(edition) <= _track_count(standard):
         return 1
-    tracks = (details(edition) or {}).get("tracks", {}).get("items")
-    standard_tracks = (details(standard) or {}).get("tracks", {}).get("items")
+    tracks, standard_tracks = kept(edition), kept(standard)
     if tracks is None or standard_tracks is None:
         return 2  # can't check; give the bigger edition the benefit of the doubt
+    extra = len(tracks) - len(standard_tracks)
+    if extra <= 0:
+        return 1
     unwanted = sum(map(_is_unwanted_bonus, tracks)) - sum(
         map(_is_unwanted_bonus, standard_tracks)
     )
     return 0 if unwanted / extra > DELUXE_MAX_UNWANTED_SHARE else 2
 
 
-def _pick_version(versions: list, cap: tuple, details) -> dict:
+def _pick_version(versions: list, cap: tuple, details, kept) -> dict:
     """Choose one of several versions of the same release."""
 
     def explicit(album):
@@ -503,7 +505,7 @@ def _pick_version(versions: list, cap: tuple, details) -> dict:
     # then explicit over clean if that wasn't decided above,
     # 4. newest remaster over older ones and the original, then more tracks
     standard = min(top, key=_track_count)
-    scores = {id(a): _edition_score(a, standard, details) for a in top}
+    scores = {id(a): _edition_score(a, standard, kept) for a in top}
     best = max(
         top,
         key=lambda a: (scores[id(a)], explicit(a), _remaster_rank(a), _track_count(a)),
@@ -526,7 +528,11 @@ def smart_discography_filter(contents: list, quality=None, get_album=None) -> li
     Drops releases by other artists, live albums and demo collections (judged
     by their titles, and for albums also by their track lists), then groups the
     versions of each album or single (deluxe, anniversary, explicit, remastered,
-    different qualities) and keeps the best one:
+    different qualities) and keeps the best one. Discs that are mostly live
+    recordings or demos are left out of the download: the kept items carry
+    them as "_skip_discs".
+
+    The best version is chosen by:
 
         1. explicit over clean, when the album itself is explicit
         2. the highest quality you'll actually get at the chosen quality setting
@@ -559,6 +565,26 @@ def smart_discography_filter(contents: list, quality=None, get_album=None) -> li
                 cache[album["id"]] = None
         return cache[album["id"]]
 
+    def disc_plan(album):
+        """(the tracks that would be downloaded, the discs left out as live or
+        demos), or (None, set()) when the track list isn't available."""
+        tracks = ((details(album) or {}).get("tracks") or {}).get("items")
+        if not tracks:
+            return None, set()
+        skip = _live_discs(tracks)
+        return [t for t in tracks if (t.get("media_number") or 1) not in skip], skip
+
+    def kept(album):
+        return disc_plan(album)[0]
+
+    def live_album(album):
+        """Live or demos throughout, even if the title doesn't say so
+        ("Pink Floyd at Pompeii - MCMLXXII"): every disc would be left out."""
+        full = details(album)
+        if full and str(full.get("release_type") or "").lower() == "live":
+            return True
+        return kept(album) == []
+
     artist_id, artist_name = contents[0].get("id"), contents[0]["name"]
     groups = {}
     # The discography comes in pages of 50 releases; use all of them, not just the first
@@ -569,7 +595,7 @@ def smart_discography_filter(contents: list, quality=None, get_album=None) -> li
         if (
             _is_demo(album)
             or _is_live(album, is_album)
-            or (is_album and _mostly_live_or_demo(details(album)))
+            or (is_album and live_album(album))
         ):
             logger.info(
                 f"{OFF}Smart discography: skipping {_describe(album)} (live/demo)"
@@ -579,10 +605,20 @@ def smart_discography_filter(contents: list, quality=None, get_album=None) -> li
     _merge_anniversary_numbers(groups)
 
     cap = _quality_cap(quality)
-    return [
-        versions[0] if len(versions) == 1 else _pick_version(versions, cap, details)
-        for versions in groups.values()
-    ]
+    picked = []
+    for versions in groups.values():
+        best = versions[0]
+        if len(versions) > 1:
+            best = _pick_version(versions, cap, details, kept)
+        skip = disc_plan(best)[1] if _release_kind(best) == "album" else set()
+        if skip:
+            best = dict(best, _skip_discs=sorted(skip))
+            logger.info(
+                f"{OFF}Smart discography: {_describe(best)}: leaving out disc(s) "
+                f"{', '.join(map(str, sorted(skip)))} (live/demo)"
+            )
+        picked.append(best)
+    return picked
 
 
 def format_duration(duration):

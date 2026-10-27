@@ -247,6 +247,7 @@ class Download:
         date_tag_format: str = "",
         genre_tag_format: str = "",
         skip_discs=None,
+        position=None,
     ):
         """
         Initializes the Download class.
@@ -306,10 +307,20 @@ class Download:
         self.genre_tag_format = genre_tag_format
         # Discs to leave out, e.g. live discs that smart discography skips
         self.skip_discs = set(skip_discs or ())
+        # (number, total) when this is one release of an artist, label or playlist:
+        # shown as "[3/17]" in front of "Downloading:" (and read by `qobuz-dl status`)
+        self.position = position
 
         self._original_folder_format = folder_format or DEFAULT_FOLDER
         self._original_track_format = track_format or DEFAULT_TRACK
         self._original_multiple_disc_track_format = settings.multiple_disc_track_format if settings else DEFAULT_MULTIPLE_DISC_TRACK
+
+    def _position_tag(self) -> str:
+        """The "[3/17] " put in front of "Downloading:" for the 3rd of 17 releases."""
+        if not self.position:
+            return ""
+        number, total = self.position
+        return f"[{number}/{total}] "
 
     def download_id_by_type(self, track=True):
         """
@@ -377,7 +388,7 @@ class Download:
             return
 
         logger.info(
-            f"\n{YELLOW}Downloading: {album_title}\nQuality: {file_format}"
+            f"\n{YELLOW}{self._position_tag()}Downloading: {album_title}\nQuality: {file_format}"
             f" ({bit_depth}/{sampling_rate})\n{OFF}"
         )
         
@@ -618,7 +629,9 @@ class Download:
                     return
             # --------------------------------------
 
-            logger.info(f"\n{YELLOW}Downloading: {artist} - {track_title}{OFF}")
+            logger.info(
+                f"\n{YELLOW}{self._position_tag()}Downloading: {artist} - {track_title}{OFF}"
+            )
 
             url = track_meta.get("album", {}).get("url", "")
             release_date = track_meta.get("release_date_original", "")

@@ -17,6 +17,7 @@ from qobuz_dl.color import GREEN, RED, YELLOW, OFF, CYAN
 from qobuz_dl.commands import qobuz_dl_args
 from qobuz_dl.core import QobuzDL
 from qobuz_dl.download_queue import (
+    QUEUE_COMMANDS,
     QUEUED_COMMANDS,
     DownloadQueue,
     is_queued_run,
@@ -408,7 +409,9 @@ def main():
                 pass
 
     _initial_checks()
-    if not is_queued_run():  # once per window is enough
+    # Once per window is enough, and the quick queue commands don't wait for it
+    command = sys.argv[1] if len(sys.argv) > 1 else None
+    if not is_queued_run() and command not in QUEUE_COMMANDS:
         check_for_updates()
 
     # --- RADAR FEATURE (Standalone Intercept) ---
@@ -567,10 +570,12 @@ def main():
     # the download runs detached and the prompt comes straight back; 'qobuz-dl
     # watch' or --watch shows its progress (see download_queue.py).
     download_queue = DownloadQueue(CONFIG_PATH)
-    if arguments.command in ("queue", "watch", "stop"):
+    if arguments.command in QUEUE_COMMANDS:
         try:
             if arguments.command == "queue":
                 queue_command(download_queue, run=arguments.run, clear=arguments.clear)
+            elif arguments.command == "status":
+                download_queue.status()
             elif arguments.command == "watch":
                 download_queue.watch()
             elif download_queue.stop():

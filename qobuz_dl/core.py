@@ -176,13 +176,14 @@ class QobuzDL:
             secret for secret in bundle.get_secrets().values() if secret
         ]  
 
-    def download_from_id(self, item_id, album=True, alt_path=None, is_playlist=False, playlist_index=None, ignore_db=False, skip_discs=None):
+    def download_from_id(self, item_id, album=True, alt_path=None, is_playlist=False, playlist_index=None, ignore_db=False, skip_discs=None, position=None):
         """
         Routes the item ID to the Downloader Engine, checking the SQLite database
         first to prevent duplicates (Smart Reverse Lookup).
         With ignore_db=True the item is downloaded even if the database lists it
         (used by sync-playlist for tracks it found missing in the folder).
         skip_discs lists disc numbers to leave out (smart discography's live discs).
+        position is (number, total) for one release of an artist, label or playlist.
         """
         if not ignore_db and handle_download_id(self.downloads_db, item_id, add_id=False, quality=self.quality):
             logger.info(
@@ -219,6 +220,7 @@ class QobuzDL:
                 date_tag_format=self.date_tag_format,
                 genre_tag_format=self.genre_tag_format,
                 skip_discs=skip_discs,
+                position=position,
             )
             dloader.download_id_by_type(not album)
         except (requests.exceptions.RequestException, NonStreamable) as e:
@@ -473,6 +475,7 @@ class QobuzDL:
                     is_playlist=is_playlist,
                     playlist_index=idx,
                     skip_discs=item.get("_skip_discs"),
+                    position=(idx, len(items)),
                 )
 
             # --- RESTORE SETTINGS ---

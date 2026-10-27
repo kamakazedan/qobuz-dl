@@ -16,11 +16,15 @@ With `background = true` in the config, dl/lucky hand their work to a detached
 --watch on the command) shows its live output; Esc stops watching while the
 download carries on. `qobuz-dl stop` ends it.
 
+`qobuz-dl status` sums it up: what's downloading, how far it's got (from the
+background log), and what's queued.
+
 Files, all in the config folder:
   queue.jsonl  the queue, one JSON entry per line
   queue.lock   held briefly around every read or change of queue.jsonl
   worker.lock  held by the qobuz-dl that's downloading, for as long as it runs
-  worker.json  who that is: its PID, and its log if it runs in the background
+  worker.json  who that is: its PID, its log if it runs in the background, and
+               the command it's running now
   logs/        one log per background session
 Both locks are OS file locks, which the OS releases if a process dies, so they
 can't go stale.
@@ -29,6 +33,7 @@ import codecs
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -40,6 +45,8 @@ from qobuz_dl.color import CYAN, GREEN, YELLOW, OFF
 # Commands that wait their turn. Interactive mode needs you at the keyboard, so
 # it never queues and isn't held up by the queue.
 QUEUED_COMMANDS = ("dl", "lucky")
+# Commands that look at or manage the queue: quick, and no Qobuz login needed
+QUEUE_COMMANDS = ("queue", "status", "watch", "stop")
 _CHILD_ENV = "QOBUZ_DL_QUEUE_CHILD"
 _BACKGROUND_ENV = "QOBUZ_DL_BACKGROUND"
 _LOG_ENV = "QOBUZ_DL_LOG"
@@ -189,6 +196,136 @@ def _collapse(text: str) -> str:
     return "\n".join(lines[-_BACKLOG_LINES:])
 
 
+def _replace(tmp, path):
+    for attempt in range(5):  # a virus scanner or a reader can hold the file for a moment
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.2)
+
+
+# --- reading a download's output, for `qobuz-dl status` ------------------------
+_STARTING = "[queue] Starting: "
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_BAR_RE = re.compile(r"(\d{1,3})%\|")  # a progress bar: " Downloading:  76%|███▌ |..."
+_SOURCE_RE = re.compile(r"^Downloading all the music from (.+) \((\w+)\)!$")
+_RELEASE_RE = re.compile(r"^(?:\[(\d+)/(\d+)\] )?Downloading: (.+)$")
+_QUALITY_RE = re.compile(r"^Quality: (.+)$")
+_FILE_RE = re.compile(r"^\[\+\] In progress: (.+?)(?: \[[\d.]+ MB\])?$")
+_FILE_DONE_RE = re.compile(r"^L Completed: (.+)$")
+_TRACK_FILE_RE = re.compile(r"^\d+\. ")  # tracks are "06. Title"; covers and booklets aren't
+_RELEASE_END_RE = re.compile(
+    r"^(?:Completed$|\[!\] Album downloaded partially|\[!\] Download aborted)")
+_STATUS_TAIL_BYTES = 2_000_000
+
+
+def read_progress(text: str) -> dict:
+    """How far a download has got, from its output: "source" (the artist, label or
+    playlist) and "kind" (which of those), "number" and "total" (which of its
+    releases), "release", "quality", "file" (the track being downloaded),
+    "percent", "file_done", "tracks_done", "release_done", and "last" (the latest
+    line). Only the latest queued command counts."""
+    start = text.rfind(_STARTING)
+    if start != -1:
+        text = text[start:]
+    progress = {}
+    for line in _ANSI_RE.sub("", text).split("\n"):
+        for part in line.split("\r"):
+            part = part.strip()
+            if not part:
+                continue
+            bar = _BAR_RE.search(part)
+            if bar:
+                if progress.get("file"):
+                    progress["percent"] = min(int(bar.group(1)), 100)
+                continue
+            progress["last"] = part
+            if part.startswith(_STARTING):
+                progress = {"last": part}
+            elif _SOURCE_RE.match(part):
+                progress["source"], progress["kind"] = _SOURCE_RE.match(part).groups()
+            elif _RELEASE_RE.match(part):
+                number, total, title = _RELEASE_RE.match(part).groups()
+                for key in ("quality", "file", "percent", "file_done", "release_done"):
+                    progress.pop(key, None)
+                progress.update(release=title, number=number and int(number),
+                                total=total and int(total), tracks_done=0)
+            elif _QUALITY_RE.match(part):
+                progress["quality"] = _QUALITY_RE.match(part).group(1)
+            elif _FILE_RE.match(part):
+                progress.update(file=_FILE_RE.match(part).group(1), file_done=False)
+                progress.pop("percent", None)
+            elif _FILE_DONE_RE.match(part):
+                name = _FILE_DONE_RE.match(part).group(1)
+                if name == progress.get("file"):
+                    progress["file_done"] = True
+                if _TRACK_FILE_RE.match(name):
+                    progress["tracks_done"] = progress.get("tracks_done", 0) + 1
+            elif _RELEASE_END_RE.match(part):
+                progress["release_done"] = True
+    return progress
+
+
+def _read_tail(path, size=_STATUS_TAIL_BYTES) -> str:
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - size))
+            data = f.read()
+    except OSError:
+        return ""
+    if len(data) == size:  # started part-way through a line: drop that line
+        data = data[data.find(b"\n") + 1:]
+    return data.decode("utf-8", "replace")
+
+
+def _progress_lines(progress: dict) -> list:
+    """read_progress() as a couple of lines for `qobuz-dl status`."""
+    if not progress.get("release"):
+        last = progress.get("last", "")
+        if not last or last.startswith(_STARTING):
+            return ["Getting started."]
+        return [f"Latest: {last}"]  # still looking up what to download
+    quality = progress.get("quality")
+    if progress.get("total"):
+        what = f"{'Release' if quality else 'Track'} {progress['number']} of {progress['total']}"
+    else:
+        what = "Album" if quality else "Track"
+    line = f"{what}: {progress['release']}" + (f", {quality}" if quality else "")
+    if progress.get("release_done"):
+        return [line + ", done"]
+    lines = [line]
+    tracks = progress.get("tracks_done", 0)
+    done = f" ({tracks} track{'s' if tracks != 1 else ''} done)" if tracks else ""
+    if progress.get("file"):
+        if progress.get("file_done"):
+            lines.append(f"Just finished: {progress['file']}{done}")
+        else:
+            percent = progress.get("percent")
+            lines.append(f"Now: {progress['file']}"
+                         + (f", {percent}%" if percent is not None else "") + done)
+    return lines
+
+
+def _duration(seconds) -> str:
+    minutes = int(max(0, seconds)) // 60
+    if minutes < 1:
+        return "under a minute"
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes // 60} h {minutes % 60:02d} min"
+
+
+def _when(added) -> str:
+    """'18:31' for something added today, else the date too."""
+    added = added or ""
+    today = time.strftime("%Y-%m-%d ")
+    return added[len(today):] if added.startswith(today) else added
+
+
 class DownloadQueue:
     def __init__(self, folder):
         os.makedirs(folder, exist_ok=True)
@@ -199,6 +336,7 @@ class DownloadQueue:
         self._queue_lock = _FileLock(os.path.join(folder, "queue.lock"))
         self._worker_lock = _FileLock(os.path.join(folder, "worker.lock"))
         self._holding_queue_lock = False
+        self._info = {}
         self.is_worker = False
 
     # --- the queue file (only touched while holding the queue lock) ---------
@@ -230,14 +368,7 @@ class DownloadQueue:
         with open(tmp, "w", encoding="utf-8") as f:
             for entry in entries:
                 f.write(json.dumps(entry) + "\n")
-        for attempt in range(5):  # a virus scanner can hold the file for a moment
-            try:
-                os.replace(tmp, self.path)
-                return
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.2)
+        _replace(tmp, self.path)
 
     def _append(self, argv, cwd):
         entry = {
@@ -273,17 +404,37 @@ class DownloadQueue:
             return False
         return True
 
-    def _became_worker(self):
+    def _became_worker(self, argv=None):
+        """argv: the command this qobuz-dl is about to run itself, if any."""
         self.is_worker = True
-        info = {"pid": os.getpid(), "background": in_background(),
-                "log": os.environ.get(_LOG_ENV) if in_background() else None}
-        with open(self.info_path, "w", encoding="utf-8") as f:
-            json.dump(info, f)
+        self._info = {"pid": os.getpid(), "background": in_background(),
+                      "log": os.environ.get(_LOG_ENV) if in_background() else None,
+                      "current": None}
+        if argv:
+            self._set_current({"argv": list(argv)})
+        else:
+            self._write_info()
         if in_background():
-            self._prune_logs(keep=info["log"])
+            self._prune_logs(keep=self._info["log"])
+
+    def _set_current(self, entry):
+        """Note the command being run now, for `qobuz-dl status`."""
+        self._info["current"] = {"id": entry.get("id"), "argv": entry.get("argv", []),
+                                 "since": time.time()}
+        self._write_info()
+
+    def _write_info(self):
+        tmp = self.info_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._info, f)
+            _replace(tmp, self.info_path)
+        except OSError:
+            pass  # only status and watch read it, and they cope without
 
     def worker_info(self):
-        """{"pid", "background", "log"} for the qobuz-dl that's downloading, or None."""
+        """{"pid", "background", "log", "current"} for the qobuz-dl that's
+        downloading, or None. "current" is {"id", "argv", "since"}: what it's running."""
         if not self.is_running():
             return None
         try:
@@ -298,7 +449,7 @@ class DownloadQueue:
         and return its position."""
         with self._locked():
             if self._worker_lock.acquire(blocking=False):
-                self._became_worker()
+                self._became_worker(argv)
                 return 0
             self._append(argv, cwd)
             return len(self._read())
@@ -348,8 +499,9 @@ class DownloadQueue:
                         self.release()
                         break
                 entry, more = queued[0], len(queued) - 1
+                self._set_current(entry)
                 print(
-                    f"\n{CYAN}[queue] Starting: qobuz-dl {describe(entry)}"
+                    f"\n{CYAN}{_STARTING}qobuz-dl {describe(entry)}"
                     + (f" ({more} more queued)" if more else "")
                     + OFF
                 )
@@ -513,6 +665,55 @@ class DownloadQueue:
                 break
             time.sleep(0.1)
         return True
+
+    def status(self, out=None):
+        """`qobuz-dl status`: what's downloading, how far it's got, and what's
+        queued. How far it's got comes from the background log, so for a download
+        running in another window it's just what it's running."""
+        out = out or sys.stdout
+
+        def say(text):
+            out.write(text + "\n")
+
+        info = self.worker_info()
+        entries = self.entries()
+        current = (info or {}).get("current") or {}
+        if info and info.get("background") and not current and entries:
+            current = entries[0]  # a background qobuz-dl runs the queue in order
+        waiting = [e for e in entries if not current.get("id") or e.get("id") != current["id"]]
+
+        if info is None:
+            if not entries:
+                say(f"{GREEN}[status] Nothing is downloading, and nothing is queued.{OFF}")
+                return
+            say(f"{YELLOW}[status] Nothing is downloading.{OFF}")
+        elif info == {}:
+            say(f"{CYAN}[status] A download is just starting.{OFF}")
+        else:
+            where = "in the background" if info.get("background") else "in another window"
+            since = current.get("since")
+            took = f", for {_duration(time.time() - since)}" if since else ""
+            say(f"{CYAN}[status] Downloading {where}{took}:{OFF}")
+            if not current.get("argv"):
+                say("  Getting the next download ready.")
+            elif info.get("background"):
+                progress = read_progress(_read_tail(info.get("log") or ""))
+                name = f"   ({progress['source']})" if progress.get("source") else ""
+                say(f"  qobuz-dl {describe(current)}{name}")
+                for line in _progress_lines(progress):
+                    say(f"  {line}")
+            else:
+                say(f"  qobuz-dl {describe(current)}")
+                say("  (that window shows how far it's got)")
+
+        if waiting:
+            heading = ("Queued next" if info is not None
+                       else "Queued, waiting for 'qobuz-dl queue --run'")
+            say(f"{YELLOW}[status] {heading} ({len(waiting)}):{OFF}")
+            for number, entry in enumerate(waiting, 1):
+                say(f"  {number}. qobuz-dl {describe(entry)}   (added {_when(entry.get('added'))})")
+        elif info is not None:
+            say("[status] Nothing else queued.")
 
 
 def queue_command(queue: DownloadQueue, run=False, clear=False):

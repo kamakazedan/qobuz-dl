@@ -125,6 +125,18 @@ def stop_args(subparsers):
     )
 
 
+def status_args(subparsers):
+    """Configures the 'status' subparser: a quick summary of downloads and the queue."""
+    return subparsers.add_parser(
+        "status",
+        description=(
+            "Show what's downloading and how far it's got (release, track, percent), "
+            "and what's queued after it."
+        ),
+        help="quick summary of the download and the queue",
+    )
+
+
 def queue_args(subparsers):
     """Configures the 'queue' subparser, which shows, runs or clears queued downloads."""
     queue = subparsers.add_parser(
@@ -655,6 +667,7 @@ def qobuz_dl_args(
     lyrics_cmd = lyrics_args(subparsers)
     sync_pl_cmd = sync_playlist_args(subparsers)
     queue_args(subparsers)
+    status_args(subparsers)
     watch_args(subparsers)
     stop_args(subparsers)
 

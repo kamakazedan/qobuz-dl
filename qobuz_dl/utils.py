@@ -270,10 +270,13 @@ _OPEN, _CLOSE = f"[{re.escape(_OPENING)}]", f"[{re.escape(_CLOSING)}]"
 _BRACKETED = f"{_OPEN}[^{re.escape(_CLOSING)}]*{_CLOSE}"
 # "Live" only marks a live recording in the version field, in a bracketed or
 # dashed suffix ("(Live at Wembley)", "Timebomb < LIVE >", "Song - Live"), as
-# "Unplugged" or "In Concert", or at the start of an album-length title ("Live
-# at Leeds"). Titles such as "Live Through This", "Live Forever" and "Long Live"
-# are left alone, and so is "I <3 Live Music": brackets other than ( and [ only
-# count once they're closed.
+# "Unplugged" or "In Concert", or in an album-length title as "Live at/in/from"
+# at the start ("Live at Leeds"), "live at/from" anywhere ("SWAG LIVE FROM
+# COACHELLA") or "Live Album" ("Homecoming: The Live Album"). "Live in" only
+# counts at the start: later on it's usually just a verb ("We Live in Public").
+# Titles such as "Live Through This", "Live Forever" and "Long Live" are left
+# alone, and so is "I <3 Live Music": brackets other than ( and [ only count
+# once they're closed.
 _LIVE_SUFFIX_RE = re.compile(
     r"[(\[][^)\]]*\blive\b"
     rf"|{_OPEN}[^{re.escape(_CLOSING)}]*\blive\b[^{re.escape(_CLOSING)}]*{_CLOSE}"
@@ -281,7 +284,9 @@ _LIVE_SUFFIX_RE = re.compile(
     re.I,
 )
 _CONCERT_RE = re.compile(r"\b(unplugged|in concert)\b", re.I)
-_LIVE_TITLE_RE = re.compile(r"^\s*live\s+(at|in|from)\b", re.I)
+_LIVE_TITLE_RE = re.compile(
+    r"^\s*live\s+(at|in|from)\b|\blive\s+(at|from)\b|\blive\s+album\b", re.I
+)
 _REMASTER_RE = re.compile(r"\bremaster(ed|s)?\b", re.I)
 _YEAR_RE = re.compile(r"\b(?:19[5-9]\d|20\d\d)\b")
 # Notes after the title: bracketed ("Album (2011 Remaster)") or after a spaced

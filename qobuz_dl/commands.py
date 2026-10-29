@@ -171,7 +171,7 @@ def queue_args(subparsers):
             "Downloads started with 'dl' or 'lucky' while another one is running wait "
             "in this queue, and start one after another when it finishes."
         ),
-        help="show, run or clear the download queue",
+        help="show the download queue, or run, clear or take items out of it",
     )
     queue.add_argument(
         "--run",
@@ -180,6 +180,12 @@ def queue_args(subparsers):
     )
     queue.add_argument(
         "--clear", action="store_true", help="remove everything from the queue"
+    )
+    queue.add_argument(
+        "--remove",
+        metavar="N",
+        help="take item N out of the queue (numbered as 'qobuz-dl queue' lists "
+        "them), or 'last' for the one added most recently",
     )
     return queue
 

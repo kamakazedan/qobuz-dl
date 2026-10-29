@@ -10,7 +10,8 @@ runs as its own qobuz-dl process, so its flags (-q, -d, --no-db, ...) and any
 relative paths apply exactly as typed. An entry is only removed after it has run,
 so closing qobuz-dl or a crash loses nothing: the next download, `qobuz-dl
 start` or `qobuz-dl queue --run` picks up what's left. A command that's queued
-already isn't added again.
+already isn't added again, and `qobuz-dl queue --remove N` (or `last`) takes one
+out.
 
 With `background = true` in the config, dl/lucky hand their work to a detached
 `qobuz-dl queue --run` and give the prompt straight back. `qobuz-dl watch` (or
@@ -389,6 +390,7 @@ def _report(snapshot: dict, max_queued=None) -> list:
         lines.append((YELLOW, f"[status] {heading} ({len(waiting)}):"))
         listed = waiting if max_queued is None else waiting[:max_queued]
         for number, entry in enumerate(listed, 1):
+            number = entry.get("_position", number)
             lines.append(("", f"  {number}. qobuz-dl {describe(entry)}   "
                               f"(added {_when(entry.get('added'))})"))
         if len(listed) < len(waiting):
@@ -621,6 +623,40 @@ class DownloadQueue:
             # same lock, so "running" can't change between the two.
             return position, self._worker_held(), position > len(entries)
 
+    def _current(self, info, entries) -> dict:
+        """The command being downloaded now ({} if none): "argv", and "id" if it
+        came from the queue."""
+        current = (info or {}).get("current") or {}
+        if info and info.get("background") and not current and entries:
+            current = entries[0]  # a background qobuz-dl runs the queue in order
+        return current
+
+    def remove(self, which):
+        """Take a command out of the queue: `which` is its position, as `qobuz-dl
+        queue` numbers them, or "last" for the one added most recently. Returns
+        (outcome, entry), outcome being "removed", "running" (it's downloading
+        now, so it stays), "empty" or "missing" (no such position)."""
+        with self._locked():
+            entries = self._read()
+            if not entries:
+                return "empty", None
+            if str(which).strip().lower() == "last":
+                number = len(entries)
+            else:
+                try:
+                    number = int(which)
+                except (TypeError, ValueError):
+                    return "missing", None
+            if not 1 <= number <= len(entries):
+                return "missing", None
+            entry = entries[number - 1]
+            running = self._current(self.worker_info(), entries).get("id")
+            if running and entry.get("id") == running:
+                return "running", entry
+            del entries[number - 1]
+            self._write(entries)
+            return "removed", entry
+
     def start(self) -> str:
         """`qobuz-dl start`: work through the queue in the background, e.g. after
         `qobuz-dl stop`. Returns "empty" if nothing is queued, "running" if a
@@ -670,8 +706,10 @@ class DownloadQueue:
                         # instead of waiting on a worker that's about to exit.
                         self.release()
                         break
-                entry, more = queued[0], len(queued) - 1
-                self._set_current(entry)
+                    entry, more = queued[0], len(queued) - 1
+                    # Noted under the queue lock, so `queue --remove` can't take
+                    # it out of the queue once it's its turn
+                    self._set_current(entry)
                 print(
                     f"\n{CYAN}{_STARTING}qobuz-dl {describe(entry)}"
                     + (f" ({more} more queued)" if more else "")
@@ -867,13 +905,13 @@ class DownloadQueue:
         """What `qobuz-dl status` shows, read afresh."""
         info = self.worker_info()
         entries = self.entries()
-        current = (info or {}).get("current") or {}
-        if info and info.get("background") and not current and entries:
-            current = entries[0]  # a background qobuz-dl runs the queue in order
+        current = self._current(info, entries)
         progress = None  # how far it's got: only known for background downloads
         if info and info.get("background") and current.get("argv"):
             progress = read_progress(_read_tail(info.get("log") or ""))
-        waiting = [e for e in entries if not current.get("id") or e.get("id") != current["id"]]
+        # Numbered as in `qobuz-dl queue`, so the numbers work with --remove
+        waiting = [dict(e, _position=n) for n, e in enumerate(entries, 1)
+                   if not current.get("id") or e.get("id") != current["id"]]
         return {"info": info, "current": current, "progress": progress, "waiting": waiting}
 
     def status(self, out=None, live=False, keys=None, interval=1.0, poll=0.1):
@@ -914,10 +952,25 @@ class DownloadQueue:
         out.flush()
 
 
-def queue_command(queue: DownloadQueue, run=False, clear=False):
-    """`qobuz-dl queue`: show the queue, or --clear it, or --run it now."""
+def queue_command(queue: DownloadQueue, run=False, clear=False, remove=None):
+    """`qobuz-dl queue`: show the queue, or --clear it, --remove one item, or
+    --run it now."""
     if clear:
         print(f"{GREEN}[queue] Removed {queue.clear()} item(s).{OFF}")
+        return
+    if remove is not None:
+        outcome, entry = queue.remove(remove)
+        if outcome == "removed":
+            print(f"{GREEN}[queue] Removed: qobuz-dl {describe(entry)}{OFF}")
+        elif outcome == "running":
+            print(f"{YELLOW}[queue] That one is downloading right now. To drop it: "
+                  f"'qobuz-dl stop', then 'qobuz-dl queue --remove {remove}', then "
+                  f"'qobuz-dl start' for the rest.{OFF}")
+        elif outcome == "empty":
+            print("[queue] Nothing queued.")
+        else:
+            print(f"[queue] There's no item {remove} in the queue; 'qobuz-dl queue' "
+                  "lists them.")
         return
     entries = queue.entries()
     if not entries:
@@ -933,11 +986,15 @@ def queue_command(queue: DownloadQueue, run=False, clear=False):
                 f"through the queue when it finishes.{OFF}"
             )
         return
+    running = queue._current(queue.worker_info(), entries).get("id")
     print(f"[queue] {len(entries)} item(s) queued:")
     for number, entry in enumerate(entries, 1):
-        print(f"  {number}. qobuz-dl {describe(entry)}   (added {entry.get('added')})")
+        note = ("downloading now" if running and entry.get("id") == running
+                else f"added {entry.get('added')}")
+        print(f"  {number}. qobuz-dl {describe(entry)}   ({note})")
     if queue.is_running():
         print("A download is running and will work through these when it finishes.")
     else:
         print("Nothing is running. 'qobuz-dl start' starts them in the background, "
               "'qobuz-dl queue --run' in this window.")
+    print("'qobuz-dl queue --remove N' takes one out ('--remove last': the newest).")

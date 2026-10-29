@@ -595,7 +595,8 @@ def main():
     if arguments.command in QUEUE_COMMANDS:
         try:
             if arguments.command == "queue":
-                queue_command(download_queue, run=arguments.run, clear=arguments.clear)
+                queue_command(download_queue, run=arguments.run, clear=arguments.clear,
+                              remove=arguments.remove)
             elif arguments.command == "status":
                 download_queue.status(live=arguments.watch)
             elif arguments.command == "watch":

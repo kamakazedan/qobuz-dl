@@ -365,6 +365,8 @@ qobuz-dl dl "URL" --no-queue      # run now, alongside the other download
 qobuz-dl status                   # what's downloading, how far it's got, what's next
 qobuz-dl status --watch           # the same, kept up to date every second until Esc
 qobuz-dl queue                    # list what's queued
+qobuz-dl queue --remove 3         # take item 3 out of the queue
+qobuz-dl queue --remove last      # take out the one added most recently
 qobuz-dl start                    # work through the queue in the background
 qobuz-dl queue --run              # work through it in this window instead
 qobuz-dl queue --clear            # empty the queue

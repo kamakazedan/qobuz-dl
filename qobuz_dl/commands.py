@@ -106,8 +106,9 @@ def watch_args(subparsers):
     return subparsers.add_parser(
         "watch",
         description=(
-            "Show the background download's progress as it happens. Esc stops "
-            "watching; the download carries on."
+            "Show the background download's progress as it happens, carrying on to "
+            "the next download when one starts, until you press Esc. The download "
+            "carries on either way."
         ),
         help="watch the background download",
     )
@@ -123,6 +124,25 @@ def stop_args(subparsers):
         ),
         help="stop the running download",
     )
+
+
+def start_args(subparsers):
+    """Configures the 'start' subparser: work through the queue in the background."""
+    start = subparsers.add_parser(
+        "start",
+        description=(
+            "Work through the queue in the background, e.g. after 'qobuz-dl stop'. "
+            "Does nothing if a download is already running: it gets to the queue "
+            "itself."
+        ),
+        help="carry on with the queue in the background",
+    )
+    start.add_argument(
+        "--watch",
+        action="store_true",
+        help="then show its progress, like 'qobuz-dl watch' (Esc stops watching)",
+    )
+    return start
 
 
 def status_args(subparsers):
@@ -676,6 +696,7 @@ def qobuz_dl_args(
     status_args(subparsers)
     watch_args(subparsers)
     stop_args(subparsers)
+    start_args(subparsers)
 
     [
         add_common_arg(i, default_folder, default_quality)

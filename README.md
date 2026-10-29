@@ -358,13 +358,15 @@ Start a `dl` or `lucky` while another one is downloading and it joins a queue
 instead of running alongside it; the running one starts it as soon as it's done.
 Each queued command runs exactly as typed (its own flags, from the folder it was
 typed in), and stays queued until it has run, so closing the window loses nothing.
+Running a command that's already queued doesn't add it a second time.
 ```bash
 qobuz-dl dl "URL"                 # in a second window: queued
 qobuz-dl dl "URL" --no-queue      # run now, alongside the other download
 qobuz-dl status                   # what's downloading, how far it's got, what's next
 qobuz-dl status --watch           # the same, kept up to date every second until Esc
 qobuz-dl queue                    # list what's queued
-qobuz-dl queue --run              # start the queue if nothing is running
+qobuz-dl start                    # work through the queue in the background
+qobuz-dl queue --run              # work through it in this window instead
 qobuz-dl queue --clear            # empty the queue
 ```
 
@@ -385,8 +387,9 @@ second; press **Esc** to stop watching (the download carries on).
 **Background downloads.** With `background = true` in `config.ini` (or `--background`
 on a single command), `dl` and `lucky` download in the background and give you the
 prompt straight back, so you can queue more. `qobuz-dl watch` shows the progress
-live; press **Esc** to stop watching while the download carries on. Ctrl+C no longer
-reaches the download, so use `qobuz-dl stop` to end it.
+live, and keeps watching for the next download once the queue's done, until you
+press **Esc** (the download carries on either way). Ctrl+C no longer reaches the
+download, so use `qobuz-dl stop` to end it, and `qobuz-dl start` to carry on later.
 ```bash
 qobuz-dl dl "URL"                 # starts in the background
 qobuz-dl dl "URL2"                # added to the queue behind it
@@ -394,6 +397,7 @@ qobuz-dl status                   # a quick summary of where it's got to
 qobuz-dl watch                    # show the progress (from any window); Esc stops watching
 qobuz-dl dl "URL" --watch         # start or queue it, then show the progress
 qobuz-dl stop                     # stop the download; the queue is kept
+qobuz-dl start                    # carry on with the queue (add --watch to watch it)
 qobuz-dl dl "URL" --foreground    # this one runs in the window instead
 ```
 

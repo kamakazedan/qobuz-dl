@@ -370,6 +370,28 @@ def _initial_checks():
     if len(sys.argv) < 2:
         sys.exit(qobuz_dl_args().print_help())
 
+
+def _start_queue(download_queue, watch=False):
+    """`qobuz-dl start`: carry on with the queue in the background."""
+    result = download_queue.start()
+    if result == "empty":
+        print("[queue] Nothing queued.")
+        return
+    if result == "running":
+        print(f"{YELLOW}[queue] Already downloading; it works through the queue "
+              f"as it goes.{OFF}")
+    elif result == "started":
+        queued = len(download_queue.entries())
+        hint = "" if watch else " 'qobuz-dl watch' shows its progress."
+        print(f"{YELLOW}[queue] Downloading the queue in the background "
+              f"({queued} item{'s' if queued != 1 else ''}).{hint}{OFF}")
+    else:
+        print(f"{YELLOW}[queue] The background download hasn't started yet. "
+              f"'qobuz-dl watch' shows what it's doing.{OFF}")
+    if watch:
+        download_queue.watch(wait=15)
+
+
 def check_for_updates():
     """Queries the GitHub API to notify the user of new Qobuz-DL Ultimate Edition releases."""
     try:
@@ -578,16 +600,22 @@ def main():
                 download_queue.status(live=arguments.watch)
             elif arguments.command == "watch":
                 download_queue.watch()
-            elif download_queue.stop():
+            elif arguments.command == "start":
+                _start_queue(download_queue, watch=arguments.watch)
+            elif not download_queue.stop():
+                print("[queue] Nothing is downloading.")
+            elif download_queue.is_running():
+                print(f"{YELLOW}[queue] Couldn't stop the download: it's still running. "
+                      "If it was started as administrator, run 'qobuz-dl stop' as "
+                      f"administrator too.{OFF}")
+            else:
                 left = len(download_queue.entries())
                 print(f"{YELLOW}[queue] Stopped the download.{OFF}")
                 if left:
                     print(
-                        f"{left} item(s) still queued: 'qobuz-dl queue --run' carries "
-                        "on, 'qobuz-dl queue --clear' drops them."
+                        f"{left} item(s) still queued: 'qobuz-dl start' carries on, "
+                        "'qobuz-dl queue --clear' drops them."
                     )
-            else:
-                print("[queue] Nothing is downloading.")
         except KeyboardInterrupt:
             pass
         sys.exit(0)
@@ -605,9 +633,10 @@ def main():
             background or getattr(arguments, "background", False) or watch
         ) and not getattr(arguments, "foreground", False)
         if background:
-            position, running = download_queue.enqueue(sys.argv[1:], os.getcwd())
+            position, running, added = download_queue.enqueue(sys.argv[1:], os.getcwd())
             if running:
-                print(f"{YELLOW}[queue] Added to the queue (position {position}).{OFF}")
+                done = "Added to" if added else "Already in"
+                print(f"{YELLOW}[queue] {done} the queue (position {position}).{OFF}")
             else:
                 download_queue.start_background()
                 if download_queue.wait_for_worker():

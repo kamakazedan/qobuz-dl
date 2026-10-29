@@ -8,13 +8,15 @@ already running works through the queue, oldest first, once its own task is done
 Each entry is the command line as typed plus the folder it was typed in, and it
 runs as its own qobuz-dl process, so its flags (-q, -d, --no-db, ...) and any
 relative paths apply exactly as typed. An entry is only removed after it has run,
-so closing qobuz-dl or a crash loses nothing: the next download, or
-`qobuz-dl queue --run`, picks up what's left.
+so closing qobuz-dl or a crash loses nothing: the next download, `qobuz-dl
+start` or `qobuz-dl queue --run` picks up what's left. A command that's queued
+already isn't added again.
 
 With `background = true` in the config, dl/lucky hand their work to a detached
 `qobuz-dl queue --run` and give the prompt straight back. `qobuz-dl watch` (or
---watch on the command) shows its live output; Esc stops watching while the
-download carries on. `qobuz-dl stop` ends it.
+--watch on the command) shows its live output until Esc, carrying on to the next
+download when one starts; the download carries on regardless. `qobuz-dl stop`
+ends it, and `qobuz-dl start` carries on with the queue in the background.
 
 `qobuz-dl status` sums it up: what's downloading, how far it's got (from the
 background log), and what's queued. `status --watch` keeps that on screen,
@@ -49,7 +51,7 @@ from qobuz_dl.color import CYAN, GREEN, YELLOW, OFF, RESET
 # it never queues and isn't held up by the queue.
 QUEUED_COMMANDS = ("dl", "lucky")
 # Commands that look at or manage the queue: quick, and no Qobuz login needed
-QUEUE_COMMANDS = ("queue", "status", "watch", "stop")
+QUEUE_COMMANDS = ("queue", "status", "watch", "stop", "start")
 _CHILD_ENV = "QOBUZ_DL_QUEUE_CHILD"
 _BACKGROUND_ENV = "QOBUZ_DL_BACKGROUND"
 _LOG_ENV = "QOBUZ_DL_LOG"
@@ -139,6 +141,16 @@ class _KeyReader:
 
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
 
+    @property
+    def interactive(self) -> bool:
+        """Whether there's a keyboard to press Esc on (input isn't redirected)."""
+        if os.name == "nt":
+            try:
+                return sys.stdin is not None and sys.stdin.isatty()
+            except (AttributeError, ValueError):
+                return False
+        return self._saved is not None
+
     def escape_pressed(self) -> bool:
         if os.name == "nt":
             import msvcrt
@@ -163,6 +175,15 @@ class _KeyReader:
 def describe(entry: dict) -> str:
     """The queued command as you'd type it."""
     return subprocess.list2cmdline(entry.get("argv", []))
+
+
+def _position(entries, argv, cwd) -> int:
+    """Where the same command, typed in the same folder, is in the queue (1 is
+    first), or 0 if it isn't."""
+    for number, entry in enumerate(entries, 1):
+        if entry.get("argv") == list(argv) and entry.get("cwd") == cwd:
+            return number
+    return 0
 
 
 def _command(entry: dict) -> list:
@@ -197,6 +218,29 @@ def _collapse(text: str) -> str:
     """What a terminal would show for text with progress bars redrawn using \\r."""
     lines = [line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n")]
     return "\n".join(lines[-_BACKLOG_LINES:])
+
+
+class _Log:
+    """A background session's log, read as it grows. One decoder for all of it,
+    so a character whose bytes arrive in two reads isn't mangled."""
+
+    def __init__(self, path):
+        self.path = path
+        self._file = open(path, "rb")
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+    def read(self, final=False) -> str:
+        return self._decoder.decode(self._file.read(), final=final)
+
+    def close(self):
+        self._file.close()
+
+
+def _stopped_watching(state) -> str:
+    if state == "idle":
+        return f"\n{YELLOW}[watch] Stopped watching.{OFF}"
+    return (f"\n{YELLOW}[watch] Stopped watching. The download carries on; "
+            f"'qobuz-dl watch' shows it again.{OFF}")
 
 
 def _replace(tmp, path):
@@ -341,7 +385,7 @@ def _report(snapshot: dict, max_queued=None) -> list:
             lines.append(("", "  (that window shows how far it's got)"))
     if waiting:
         heading = ("Queued next" if info is not None
-                   else "Queued, waiting for 'qobuz-dl queue --run'")
+                   else "Queued, waiting for 'qobuz-dl start'")
         lines.append((YELLOW, f"[status] {heading} ({len(waiting)}):"))
         listed = waiting if max_queued is None else waiting[:max_queued]
         for number, entry in enumerate(listed, 1):
@@ -545,23 +589,51 @@ class DownloadQueue:
 
     def enqueue_if_busy(self, argv, cwd) -> int:
         """If nothing else is downloading, make this process the worker and
-        return 0. Otherwise add the command to the queue for the qobuz-dl that is,
-        and return its position."""
+        return 0 (a copy of the same command waiting in the queue is dropped:
+        it's running now). Otherwise add the command to the queue for the
+        qobuz-dl that is, unless it's queued already, and return its position."""
         with self._locked():
+            entries = self._read()
+            position = _position(entries, argv, cwd)
             if self._worker_lock.acquire(blocking=False):
+                if position:
+                    del entries[position - 1]
+                    self._write(entries)
                 self._became_worker(argv)
                 return 0
+            if position:
+                return position
             self._append(argv, cwd)
-            return len(self._read())
+            return len(entries) + 1
 
     def enqueue(self, argv, cwd):
-        """Add a command to the queue. Returns (position, running): whether a
-        qobuz-dl is downloading, and so will get to it."""
+        """Add a command to the queue, unless the same command (typed in the same
+        folder) is queued already. Returns (position, running, added): its place
+        in the queue, whether a qobuz-dl is downloading (and so will get to it),
+        and whether it was added just now."""
         with self._locked():
-            self._append(argv, cwd)
+            entries = self._read()
+            position = _position(entries, argv, cwd)
+            if not position:
+                self._append(argv, cwd)
+                position = len(entries) + 1
             # Checked under the queue lock: a worker gives up its slot under the
             # same lock, so "running" can't change between the two.
-            return len(self._read()), self._worker_held()
+            return position, self._worker_held(), position > len(entries)
+
+    def start(self) -> str:
+        """`qobuz-dl start`: work through the queue in the background, e.g. after
+        `qobuz-dl stop`. Returns "empty" if nothing is queued, "running" if a
+        qobuz-dl is downloading already (it works through the queue itself),
+        "started", or "slow" if the background one hasn't got going within 15
+        seconds."""
+        with self._locked():
+            if not self._read():
+                return "empty"
+            if self._worker_held():
+                return "running"
+        self.start_background()
+        return "started" if self.wait_for_worker() else "slow"
 
     def claim(self) -> bool:
         """Become the worker if nothing else is downloading."""
@@ -619,8 +691,9 @@ class DownloadQueue:
                 if left:
                     print(
                         f"\n{YELLOW}[queue] Stopped with {left} item(s) still queued. "
-                        "Run 'qobuz-dl queue --run' to carry on, or "
-                        f"'qobuz-dl queue --clear' to drop them.{OFF}"
+                        "'qobuz-dl start' carries on in the background ('qobuz-dl "
+                        f"queue --run' in this window), 'qobuz-dl queue --clear' drops "
+                        f"them.{OFF}"
                     )
         if done:
             print(f"\n{GREEN}[queue] Queue finished ({done} item(s) run).{OFF}")
@@ -674,8 +747,10 @@ class DownloadQueue:
         return max(logs, key=os.path.getmtime) if logs else None
 
     def watch(self, wait=0.0, keys=None, out=None, poll=0.2):
-        """Show the background download's output as it happens. Esc (or q, or
-        Ctrl+C) stops watching; the download carries on. Returns by itself once
+        """Show the background download's output as it happens, until Esc (or q,
+        or Ctrl+C); the download carries on. When there's nothing left to
+        download it keeps watching, and follows the next background download
+        when one starts. Without a keyboard to press Esc on, it returns once
         there's nothing left to download. `wait` gives a just-started background
         qobuz-dl that long to get going."""
         out = out or sys.stdout
@@ -689,55 +764,77 @@ class DownloadQueue:
             time.sleep(0.1)
             info = self.worker_info()
 
-        if info is not None and not info.get("background"):
-            print("The download that's running is in another window; there's nothing "
-                  "to watch here.")
-            return
-        log_path = (info or {}).get("log") or self._latest_log()
-        if not log_path or not os.path.exists(log_path):
-            print("Nothing has run in the background yet.")
-            return
-
-        log = open(log_path, "rb")
-        # One decoder for the backlog and the live part, so a character whose
-        # bytes are split between the two isn't mangled.
-        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        log = None  # the background session being followed
+        if info is None or info.get("background"):
+            path = (info or {}).get("log") or self._latest_log()
+            if path and os.path.exists(path):
+                log = _Log(path)
+                out.write(_collapse(log.read(final=info is None)))
+                out.flush()
+        # "live": following a background download; "idle": nothing downloading;
+        # "window": a download is running in another window (which shows it)
+        state, window = "live", None
         try:
-            out.write(_collapse(decoder.decode(log.read(), final=info is None)))
-            out.flush()
-            if info is None:
-                print(f"\n{GREEN}[watch] Nothing is downloading right now.{OFF}")
-                return
-            print(f"\n{YELLOW}[watch] Live progress. Press Esc to stop watching; "
-                  f"the download carries on.{OFF}")
             with (keys or _KeyReader()) as key_reader:
+                until_esc = getattr(key_reader, "interactive", False)
+                if info is None:
+                    state = "idle"
+                    print(f"\n{GREEN}[watch] Nothing is downloading right now.{OFF}" if log
+                          else "Nothing has run in the background yet.")
+                elif not info.get("background"):
+                    state, window = "window", info.get("pid")
+                    print(f"{YELLOW}[watch] The download that's running is in another "
+                          f"window, which shows its progress.{OFF}" if until_esc
+                          else "The download that's running is in another window; "
+                          "there's nothing to watch here.")
+                else:
+                    print(f"\n{YELLOW}[watch] Live progress. Press Esc to stop watching; "
+                          f"the download carries on.{OFF}")
+                if state != "live":
+                    if not until_esc:
+                        return
+                    print(f"{YELLOW}[watch] Watching for the next download. Press Esc "
+                          f"to stop watching.{OFF}")
                 while True:
-                    chunk = log.read()
+                    chunk = log.read() if log else ""
                     if chunk:
-                        out.write(decoder.decode(chunk))
+                        out.write(chunk)
                         out.flush()
                     if key_reader.escape_pressed():
-                        print(f"\n{YELLOW}[watch] Stopped watching. The download "
-                              f"carries on; 'qobuz-dl watch' shows it again.{OFF}")
+                        print(_stopped_watching(state))
                         return
                     info = self.worker_info()
                     if info is None:
-                        out.write(decoder.decode(log.read(), final=True))
-                        print(f"\n{GREEN}[watch] All done: nothing left to "
-                              f"download.{OFF}")
-                        return
-                    new_log = info.get("log")
-                    if new_log and new_log != log_path and os.path.exists(new_log):
-                        log.close()  # a new background session took over
-                        log_path, log = new_log, open(new_log, "rb")
-                        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+                        if state != "idle":
+                            if log:
+                                out.write(log.read(final=True))
+                                out.flush()
+                            print(f"\n{GREEN}[watch] All done: nothing left to "
+                                  f"download.{OFF}")
+                            if not until_esc:
+                                return
+                            print(f"{YELLOW}[watch] Still watching for the next "
+                                  f"download. Press Esc to stop watching.{OFF}")
+                            state = "idle"
+                    elif info.get("background") and info.get("log"):
+                        if (not log or info["log"] != log.path) and os.path.exists(info["log"]):
+                            if log:  # a new background session: finish the old one first
+                                out.write(log.read(final=True))
+                                log.close()
+                            log = _Log(info["log"])
+                        state = "live"
+                    elif info and not info.get("background"):
+                        if state != "window" or info.get("pid") != window:
+                            print(f"\n{YELLOW}[watch] A download is running in another "
+                                  f"window, which shows its progress.{OFF}")
+                        state, window = "window", info.get("pid")
                     if not chunk:
                         time.sleep(poll)
         except KeyboardInterrupt:
-            print(f"\n{YELLOW}[watch] Stopped watching. The download carries on; "
-                  f"'qobuz-dl watch' shows it again.{OFF}")
+            print(_stopped_watching(state))
         finally:
-            log.close()
+            if log:
+                log.close()
 
     def stop(self) -> bool:
         """Stop the qobuz-dl that's downloading, and whatever it started. What
@@ -842,4 +939,5 @@ def queue_command(queue: DownloadQueue, run=False, clear=False):
     if queue.is_running():
         print("A download is running and will work through these when it finishes.")
     else:
-        print("Nothing is running. Start them with 'qobuz-dl queue --run'.")
+        print("Nothing is running. 'qobuz-dl start' starts them in the background, "
+              "'qobuz-dl queue --run' in this window.")
